@@ -11,7 +11,8 @@ blueprint:
     - No ping-pong: nothing is sent when the other side already matches.
     - No surprise changes when the remote or Home Assistant reconnects: when the remote comes back online,
       it is updated from the light (never the other way round).
-    - Colour temperature is clamped to what the receiving light supports.
+    - Colour temperature is scaled between the two ranges (or clamped, if you prefer), so the whole dial
+      is usable even when the light's range is narrower than the remote's.
     - Optional: actions for double / triple / 4 / 5 clicks made inside this channel's menu on the remote.
 
     Create one automation per remote channel. Requires Home Assistant 2024.10 or newer.
@@ -42,6 +43,44 @@ blueprint:
           max: 30
           step: 1
           unit_of_measurement: s
+    scale_color_temp:
+      name: Scale colour temperature range
+      description: >
+        On: the remote's full warm↔cool range is mapped onto the light's range, so every dial step changes the
+        light (e.g. remote 2000–6536 K → bulb 2700–6500 K). Off: exact Kelvin values, clamped to the light's
+        range; the part of the dial outside the light's range then does nothing.
+      default: true
+      selector:
+        boolean: {}
+    reverse_color_temp:
+      name: Reverse colour temperature
+      description: >
+        Turn on if the light goes cooler when the remote goes warmer. Some integrations (e.g. certain Tuya
+        bulbs) map colour temperature backwards. Applies in both directions.
+      default: false
+      selector:
+        boolean: {}
+    transition_seconds:
+      name: Transition
+      description: >
+        Fade time used when the remote changes the light, so brightness and colour glide between dial steps
+        instead of jumping. Only lights that support transitions use it (Matter, Zigbee, Hue, ESPHome, WLED...);
+        Home Assistant ignores it for the others (e.g. Tuya cloud). 0 = instant.
+      default: 0.4
+      selector:
+        number:
+          min: 0
+          max: 2
+          step: 0.1
+          unit_of_measurement: s
+    resend_after_power_on:
+      name: Re-send brightness after switching on
+      description: >
+        Many Tuya bulbs ignore the brightness/colour sent together with "turn on" and come on at their saved
+        level (often 100 %). When on, the values are sent a second time once the light is on.
+      default: true
+      selector:
+        boolean: {}
     multi_click:
       name: Multi-click actions (optional)
       icon: mdi:gesture-double-tap
@@ -107,6 +146,10 @@ variables:
   remote_entity: !input remote_light
   target_entity: !input target_light
   priority_s: !input remote_priority_seconds
+  scale_ct: !input scale_color_temp
+  reverse_ct: !input reverse_color_temp
+  transition_s: !input transition_seconds
+  resend_on: !input resend_after_power_on
 
 conditions:
   # Only real on/off ⇄ on/off changes of light values. Skips unavailable/unknown transitions, which would
@@ -167,17 +210,52 @@ actions:
       dst_hs: "{{ state_attr(dst, 'hs_color') | list if state_attr(dst, 'hs_color') else none }}"
       want_ct: "{{ src_mode in ['color_temp', 'white'] and src_k is not none }}"
       want_hs: "{{ src_mode in ['hs', 'rgb', 'xy', 'rgbw', 'rgbww'] and src_hs is not none }}"
+      # Colour temperature for the destination. Scaling is done in mireds (1e6 / K), which is linear for the
+      # eye and is what Matter uses, so it is exactly reversible between the two directions: a light's echo of
+      # a value the remote sent maps back to the remote's own value and is not bounced back to the remote.
+      # Ranges are sorted (warm = lower Kelvin) because some integrations report min/max the wrong way round,
+      # which would otherwise reverse the dial direction.
       kelvin: >
-        {% set lo = state_attr(dst, 'min_color_temp_kelvin') | int(2000) %}
-        {% set hi = state_attr(dst, 'max_color_temp_kelvin') | int(6500) %}
-        {{ [[src_k | int(4000), lo] | max, hi] | min }}
+        {% set d1 = state_attr(dst, 'min_color_temp_kelvin') | int(2000) %}
+        {% set d2 = state_attr(dst, 'max_color_temp_kelvin') | int(6500) %}
+        {% set dlo, dhi = [d1, d2] | min, [d1, d2] | max %}
+        {% set k = src_k | int(4000) %}
+        {% set dm_cool, dm_warm = 1000000 / dhi, 1000000 / dlo %}
+        {% if scale_ct %}
+          {% set s1 = state_attr(src, 'min_color_temp_kelvin') | int(2000) %}
+          {% set s2 = state_attr(src, 'max_color_temp_kelvin') | int(6500) %}
+          {% set slo, shi = [s1, s2] | min, [s1, s2] | max %}
+          {% set sm_cool, sm_warm = 1000000 / shi, 1000000 / slo %}
+          {% set f = ((1000000 / k - sm_cool) / [sm_warm - sm_cool, 1] | max) %}
+        {% else %}
+          {% set kc = [[k, dlo] | max, dhi] | min %}
+          {% set f = ((1000000 / kc - dm_cool) / [dm_warm - dm_cool, 1] | max) %}
+        {% endif %}
+        {% set f = [[f, 0] | max, 1] | min %}
+        {# reversing is its own inverse, so both directions stay consistent (echoes still match) #}
+        {% set f = 1 - f if reverse_ct else f %}
+        {{ (1000000 / (dm_cool + f * (dm_warm - dm_cool))) | round(0) | int }}
       brightness: "{{ [src_bri, 1] | max }}"
+      # Fade only towards the real light; updates to the remote itself stay instant.
+      transition: "{{ (transition_s | float(0)) if from_remote else 0 }}"
+      # One payload for every "turn on", so the optional re-send is guaranteed to be identical.
+      on_data: >
+        {% set d = {'brightness': brightness, 'transition': transition} %}
+        {% if want_ct %}
+          {% set d = dict(d, color_temp_kelvin=kelvin | int) %}
+        {% elif want_hs %}
+          {% set d = dict(d, hs_color=[src_hs[0] | float, src_hs[1] | float]) %}
+        {% endif %}
+        {{ d }}
 
   # Valid source state, and only send when the destination doesn't already match (stops ping-pong and
   # rounding echoes between Matter's 0-254 and Tuya's own scales).
   - condition: template
     value_template: >
       {% if src_state not in ['on', 'off'] or dst_state not in ['on', 'off'] %}
+        false
+      {% elif from_remote and src_state == 'on' and src_bri <= 0 %}
+        {# transient "on without a level" from the remote: the real brightness update follows right after #}
         false
       {% elif src_state == 'off' %}
         {{ dst_state != 'off' }}
@@ -186,7 +264,9 @@ actions:
       {% else %}
         {% set bri_diff = (brightness - dst_bri) | abs > 3 %}
         {% if want_ct %}
-          {% set col_diff = dst_k is none or (kelvin | int - dst_k | int) | abs > 60 %}
+          {# compare in mireds: one dial step is ~10-17 mireds, rounding echoes are 1-2 #}
+          {% set col_diff = dst_k is none or dst_k | int(0) <= 0 or
+                            (1000000 / (kelvin | int) - 1000000 / (dst_k | int)) | abs > 3 %}
         {% elif want_hs %}
           {% if dst_hs is none %}
             {% set col_diff = true %}
@@ -208,29 +288,17 @@ actions:
             target:
               entity_id: "{{ dst }}"
 
-      - conditions: "{{ want_ct }}"
-        sequence:
-          - action: light.turn_on
-            target:
-              entity_id: "{{ dst }}"
-            data:
-              brightness: "{{ brightness }}"
-              color_temp_kelvin: "{{ kelvin }}"
-
-      - conditions: "{{ want_hs }}"
-        sequence:
-          - action: light.turn_on
-            target:
-              entity_id: "{{ dst }}"
-            data:
-              brightness: "{{ brightness }}"
-              hs_color:
-                - "{{ src_hs[0] | float }}"
-                - "{{ src_hs[1] | float }}"
-
     default:
       - action: light.turn_on
         target:
           entity_id: "{{ dst }}"
-        data:
-          brightness: "{{ brightness }}"
+        data: "{{ on_data }}"
+      # The light was off: send the same values again once it is on (see resend_after_power_on).
+      - if: "{{ from_remote and resend_on and dst_state == 'off' }}"
+        then:
+          - delay:
+              milliseconds: 500
+          - action: light.turn_on
+            target:
+              entity_id: "{{ dst }}"
+            data: "{{ on_data }}"

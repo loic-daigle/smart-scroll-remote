@@ -907,14 +907,16 @@ extern "C" void matter_update_intensity(uint8_t channel, uint8_t intensity_0_100
     light_config[channel].brightness = level;
     light_config[channel].changed = true;
 
+    // Order matters: controllers apply each attribute report as it arrives. Reporting On before the new level
+    // (or writing level 0 on Off) exposed a transient "on at brightness 0" state, which Home Assistant passed to
+    // the real light, which then came on at its last brightness (often 100 %) until the next dial step.
     if (!should_be_on) {
-        // Send Level 0 then Off
-        schedule_matter_update(light_endpoint_ids[channel], LevelControl::Id, LevelControl::Attributes::CurrentLevel::Id, esp_matter_nullable_uint8(0));
+        // Off only: keep the last level, like a real light (the internal state above still tracks 0 = off)
         schedule_matter_update(light_endpoint_ids[channel], OnOff::Id, OnOff::Attributes::OnOff::Id, esp_matter_bool(false));
     } else {
-        // Send On then Level (using Nullable UINT8 for spec compliance)
-        schedule_matter_update(light_endpoint_ids[channel], OnOff::Id, OnOff::Attributes::OnOff::Id, esp_matter_bool(true));
+        // Level first, then On, so the light never appears "on" with a stale level
         schedule_matter_update(light_endpoint_ids[channel], LevelControl::Id, LevelControl::Attributes::CurrentLevel::Id, esp_matter_nullable_uint8(level));
+        schedule_matter_update(light_endpoint_ids[channel], OnOff::Id, OnOff::Attributes::OnOff::Id, esp_matter_bool(true));
     }
 
     // B. Fire Direct Command over Binding (one message: MoveToLevelWithOnOff also switches the light on)
