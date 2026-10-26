@@ -1,21 +1,34 @@
-# ESP-IDF build output
+# ===== Firmware (ESP-IDF) =====
 build/
 managed_components/
 sdkconfig.old
 sdkconfig.bak
 build.log
-
-# Firmware images (built from source; attach to a GitHub release instead)
-*.bin
-
+# Firmware images are built from source; attach them to a GitHub release instead
+firmware/*.bin
 # Local working copies
 backup_before_network_fix/
-
-# Editor / leftovers from an earlier PlatformIO setup (not used by the ESP-IDF build)
-.vscode/
+# Leftovers from an earlier PlatformIO setup (not used by the ESP-IDF build)
+firmware/include/
+firmware/components/
 .pio
-/include/
-.DS_Store
+# Note: firmware/sdkconfig IS committed on purpose: it is the exact, tested configuration.
+# firmware/sdkconfig.defaults documents the important options and is used if sdkconfig is deleted.
 
-# Note: sdkconfig IS committed on purpose — it is the exact, tested configuration.
-# sdkconfig.defaults documents the important options and is used if sdkconfig is deleted.
+# ===== PCB (KiCad) =====
+*-backups/
+_autosave-*
+*.kicad_prl
+fp-info-cache
+*.lck
+\#auto_saved_files\#
+
+# ===== Enclosure / CAD =====
+*.tmp
+~$*
+
+# ===== Editors / OS =====
+.vscode/
+.DS_Store
+Thumbs.db
+desktop.ini

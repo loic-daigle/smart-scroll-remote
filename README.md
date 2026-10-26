@@ -4,6 +4,8 @@ A battery-powered **Matter** scroll-wheel remote for **ESP32-C6**, in the spirit
 
 The same firmware runs on **Thread _or_ Wi-Fi**, selectable at runtime. On Thread it behaves as a proper **sleepy end device**: it sleeps between interactions but stays connected, so the first turn of the dial is answered within about a second.
 
+This repository contains everything needed to build one: the [firmware](firmware/), the [PCB](hardware/pcb/), the [enclosure](hardware/enclosure/) and a [Home Assistant blueprint](home_assistant/).
+
 ---
 
 ## Features
@@ -18,6 +20,9 @@ The same firmware runs on **Thread _or_ Wi-Fi**, selectable at runtime. On Threa
 - **Home Assistant blueprint** that keeps each channel in sync with any light or light group (e.g. Tuya) and adds click actions.
 
 ## Hardware
+
+- **PCB:** design files, fabrication outputs and BOM in [`hardware/pcb/`](hardware/pcb/)
+- **Enclosure:** CAD sources and print-ready files in [`hardware/enclosure/`](hardware/enclosure/)
 
 | Part | Notes |
 |---|---|
@@ -39,7 +44,7 @@ The same firmware runs on **Thread _or_ Wi-Fi**, selectable at runtime. On Threa
 | NeoPixel power enable | 7 | Active low (LOW = LEDs powered) |
 | BOOT / download mode | 9 | Hold LOW at power-up to force flashing mode (recovery only) |
 
-The pins are defined at the top of [`main/main.c`](main/main.c).
+The pins are defined at the top of [`firmware/main/main.c`](firmware/main/main.c).
 
 > **Antenna placement matters.** The module's PCB antenna needs roughly 15 mm of clearance from metal, ground planes and the battery. A cell or metal part on top of or in front of the antenna costs a lot of range, and the logs show it as many MAC-layer retries (`Frame tx attempt 1/16 failed, error:NoAck`). Keep the antenna end of the module free, or use a module with an external antenna connector.
 
@@ -71,18 +76,21 @@ export ESP_MATTER_PATH=~/esp-matter
 . $ESP_MATTER_PATH/export.sh
 
 git clone https://github.com/loic-daigle/smart-scroll-remote.git
-cd smart-scroll-remote
+cd smart-scroll-remote/firmware
 idf.py build
 idf.py -p <PORT> flash monitor
 ```
 
-The committed `sdkconfig` is the exact tested configuration (target `esp32c6`). [`sdkconfig.defaults`](sdkconfig.defaults) lists the options that matter, with comments explaining each one.
+The committed [`firmware/sdkconfig`](firmware/sdkconfig) is the exact tested configuration (target `esp32c6`). [`firmware/sdkconfig.defaults`](firmware/sdkconfig.defaults) lists the options that matter, with comments explaining each one.
+
+> **Windows + WSL:** the sources can live on the Windows drive (handy for GitHub Desktop and CAD/EDA tools) while building in WSL. Keep the build directory on the WSL filesystem for speed:
+> `cd /mnt/c/.../smart-scroll-remote/firmware && idf.py -B ~/builds/smart_scroll_remote build`
 
 ### Flashing tips
 
 - While the remote is plugged into a computer, it **does not light-sleep**, so normal `idf.py flash` and serial monitoring work.
 - If the chip doesn't answer (e.g. after it slept on battery, when its USB stays dead until reset): hold **GPIO9 LOW** while plugging it in to enter download mode, then flash.
-- From Windows with the project in WSL, the simplest route is the Windows `esptool` on the COM port, using `build/flash_args`.
+- From Windows (WSL has no direct USB access), the simplest route is the Windows `esptool` on the COM port, run from the build directory with `@flash_args`.
 
 ## Pairing (commissioning)
 
@@ -138,7 +146,7 @@ These are the non-obvious parts of making a dual-stack sleepy remote work on ESP
 
 - **Automatic light sleep instead of manual sleep.** The firmware never calls `esp_light_sleep_start()`. Doing that freezes the radio, so the Thread parent drops the child after its timeout and every interaction starts with a rejoin. Instead, the UI holds a PM lock while active, and the power manager sleeps between Thread polls and Wi-Fi beacons.
 - **`CONFIG_IEEE802154_SLEEP_ENABLE` requires `CONFIG_ESP_PHY_MAC_BB_PD` on ESP32-C6.** Without it, the radio comes back broken after the first light sleep, while the rest of the firmware keeps running.
-- **Thread poll period in dual-stack builds.** On ESP32, the Wi-Fi `ConnectivityManager::_SetPollingInterval` (always `NOT_IMPLEMENTED`) hides the Thread one, so the ICD manager never sets the OpenThread poll period (`Failed to set Fast/Slow Polling Interval: err 2d`). An ICD state observer in [`main/matter.cpp`](main/matter.cpp) applies it directly with `otLinkSetPollPeriod`: 200 ms when active, 5 s when idle.
+- **Thread poll period in dual-stack builds.** On ESP32, the Wi-Fi `ConnectivityManager::_SetPollingInterval` (always `NOT_IMPLEMENTED`) hides the Thread one, so the ICD manager never sets the OpenThread poll period (`Failed to set Fast/Slow Polling Interval: err 2d`). An ICD state observer in [`firmware/main/matter.cpp`](firmware/main/matter.cpp) applies it directly with `otLinkSetPollPeriod`: 200 ms when active, 5 s when idle.
 - **Correct network type in controllers.** The ESP32 diagnostics provider reports every network interface as operational, so Home Assistant showed the Thread remote as Wi-Fi. A small provider subclass marks the unused transport's interface as non-operational.
 - **Rate-limited reporting.** Dial changes are published at most every 300 ms, always with the latest value. Matter's reliable messaging handles retries.
 - **USB while sleeping.** The USB Serial/JTAG port can't work during light sleep. `CONFIG_USJ_NO_AUTO_LS_ON_CONNECTION` keeps the chip awake whenever a USB host is connected.
@@ -146,17 +154,31 @@ These are the non-obvious parts of making a dual-stack sleepy remote work on ESP
 ## Project layout
 
 ```
-main/
-  main.c                 hardware, input handling, sleep, Matter sync task, LED feedback
-  matter.cpp / matter.h  Matter node, endpoints, transport personality, SDK workarounds
-  menu_system_matter.cpp controller → remote callbacks (values from Home Assistant)
-  src/button_menu.c      button debouncing, menu state machine, LED rendering, NVS storage
-  include/               menu definitions, CHIP project config (device identity)
-home_assistant/          Home Assistant blueprint
-partitions.csv           4 MB layout (single factory app, NVS, factory data)
-sdkconfig.defaults       key configuration with explanations
+firmware/                    ESP-IDF project (build from here)
+  main/
+    main.c                   hardware, input handling, sleep, Matter sync task, LED feedback
+    matter.cpp / matter.h    Matter node, endpoints, transport personality, SDK workarounds
+    menu_system_matter.cpp   controller → remote callbacks (values from Home Assistant)
+    src/button_menu.c        button debouncing, menu state machine, LED rendering, NVS storage
+    include/                 menu definitions, CHIP project config (device identity)
+  partitions.csv             4 MB layout (single factory app, NVS, factory data)
+  sdkconfig                  exact tested configuration
+  sdkconfig.defaults         key configuration with explanations
+  MATTER_INTEGRATION.md      early development notes (French, partly outdated)
+hardware/
+  pcb/                       schematic, PCB layout, fabrication files, BOM
+  enclosure/                 CAD sources and 3D-print files
+home_assistant/
+  smart_remote_light_sync.yaml   Home Assistant blueprint
 ```
 
 ## License
 
-[MIT](LICENSE) © 2026 Loic Daigle
+© 2026 Loic Daigle
+
+| Part | Licence |
+|---|---|
+| Firmware ([`firmware/`](firmware/)) and Home Assistant blueprint ([`home_assistant/`](home_assistant/)) | [MIT](LICENSE) |
+| Hardware: PCB and enclosure ([`hardware/`](hardware/)) | [CERN-OHL-S v2](hardware/LICENSE) (strongly reciprocal) |
+
+In short: do what you like with the code. If you modify and distribute the hardware, you must share your modified design files under the same CERN-OHL-S licence.
