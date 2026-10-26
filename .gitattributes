@@ -1,0 +1,5 @@
+# Keep LF everywhere: the project is built in WSL/Linux and edited from Windows
+* text=auto eol=lf
+*.bin binary
+*.png binary
+*.jpg binary
