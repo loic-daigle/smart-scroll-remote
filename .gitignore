@@ -1,0 +1,21 @@
+# ESP-IDF build output
+build/
+managed_components/
+sdkconfig.old
+sdkconfig.bak
+build.log
+
+# Firmware images (built from source; attach to a GitHub release instead)
+*.bin
+
+# Local working copies
+backup_before_network_fix/
+
+# Editor / leftovers from an earlier PlatformIO setup (not used by the ESP-IDF build)
+.vscode/
+.pio
+/include/
+.DS_Store
+
+# Note: sdkconfig IS committed on purpose — it is the exact, tested configuration.
+# sdkconfig.defaults documents the important options and is used if sdkconfig is deleted.

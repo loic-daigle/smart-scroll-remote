@@ -1,0 +1,154 @@
+# ESP32-C6 Target
+CONFIG_IDF_TARGET="esp32c6"
+
+# Flash Configuration (Faster QIO mode)
+CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+
+# Power Management - required for low-power operation with tickless idle
+CONFIG_PM_ENABLE=y
+CONFIG_PM_POWER_DOWN_CPU_IN_LIGHT_SLEEP=n
+CONFIG_PM_POWER_DOWN_PERIPHERAL_IN_LIGHT_SLEEP=n
+CONFIG_FREERTOS_USE_TICKLESS_IDLE=y
+# CONFIG_FREERTOS_IDLE_TIME_BEFORE_SLEEP=3
+# Let the 802.15.4 radio sleep between Thread polls during automatic light sleep
+CONFIG_IEEE802154_SLEEP_ENABLE=y
+# REQUIRED with the above on ESP32-C6: the modem domain powers down in light sleep, and the
+# retention clock-bug workaround (SOC_PM_RETENTION_HAS_CLOCK_BUG) only runs with MAC_BB_PD.
+# Without it the Thread radio comes back broken after the first light sleep (UI keeps working).
+# Same as ESP-IDF examples/openthread/ot_sleepy_device/light_sleep/sdkconfig.defaults.esp32c6
+CONFIG_ESP_PHY_MAC_BB_PD=y
+# Stay out of light sleep while a USB host is attached, so flashing/monitoring over USB keeps working
+# (a plain USB charger sends no USB frames, so the remote still sleeps while charging)
+CONFIG_USJ_NO_AUTO_LS_ON_CONNECTION=y
+
+# WiFi Power Save
+# CONFIG_ESP_WIFI_STA_DISCONNECTED_PM_ENABLE=y
+
+# Matter Configuration
+CONFIG_CHIP_TASK_STACK_SIZE=12288
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=12288
+CONFIG_GENERIC_SWITCH_TYPE_MOMENTARY=y
+CONFIG_ENABLE_OTA_REQUESTOR=n
+CONFIG_DEVICE_SOFTWARE_VERSION=1
+CONFIG_DEVICE_SOFTWARE_VERSION_STRING="1.0.0"
+
+
+# BLE for Commissioning
+CONFIG_BT_ENABLED=y
+CONFIG_BT_NIMBLE_ENABLED=y
+CONFIG_CHIPOBLE_ENABLE_ADVERTISING_AUTOSTART=1
+CONFIG_BT_NIMBLE_ENABLE_CONN_REATTEMPT=n
+
+# Custom Partition Table
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# mbedTLS HKDF required for Matter crypto
+CONFIG_MBEDTLS_HKDF_C=y
+
+# OpenThread Configuration
+CONFIG_OPENTHREAD_ENABLED=y
+CONFIG_OPENTHREAD_MTD=y
+CONFIG_OPENTHREAD_SRP_CLIENT=y
+CONFIG_OPENTHREAD_DNS_CLIENT=y
+# Sleepy End Device behavior: keep RX off when idle so Thread can poll.
+CONFIG_OPENTHREAD_RX_ON_WHEN_IDLE=n
+
+# Poll Period is irrelevant for MED (RX is always on)
+# but we remove the manual override just in case.
+# CONFIG_OPENTHREAD_POLL_PERIOD=1000
+
+# Matter Transport Selection - DUAL STACK (Wi-Fi + Thread)
+# Both transports are enabled in firmware. The commissioner (Home Assistant, Apple Home)
+# chooses which transport to use during commissioning. After commissioning, only the
+# selected transport is active for Matter traffic.
+# NOTE: The ESP32-C6 has a single 2.4GHz radio, but after commissioning only one
+# transport is used, so there is no interference.
+CONFIG_ENABLE_WIFI_STATION=y
+CONFIG_ESP_WIFI_SOFTAP_SUPPORT=n
+CONFIG_CHIP_ENABLE_OPENTHREAD=y
+CONFIG_CHIP_ENABLE_WIFI=y
+CONFIG_ESP_MATTER_ENABLE_OPENTHREAD=y
+CONFIG_ESP_MATTER_ENABLE_WIFI=y
+
+
+# CRITICAL: Enable persistent subscriptions for reliable reconnection after reset
+# Without this, the device cannot resume CASE sessions and waits for controller
+# to initiate reconnection (can take up to 10 minutes!)
+CONFIG_ENABLE_PERSIST_SUBSCRIPTIONS=y
+
+# ICD Configuration - ENABLED to show as Sleeping End Device
+CONFIG_ENABLE_ICD_SERVER=y
+CONFIG_SUPPORT_ICD_MANAGEMENT_CLUSTER=y
+# Idle mode duration must be >= slow poll interval (spec requirement).
+# Active window is long enough for the controller's response to arrive after a dial change.
+CONFIG_ICD_SLOW_POLL_INTERVAL_MS=5000
+CONFIG_ICD_FAST_POLL_INTERVAL_MS=200
+CONFIG_ICD_IDLE_MODE_INTERVAL_SEC=60
+CONFIG_ICD_ACTIVE_MODE_INTERVAL_MS=1000
+CONFIG_ICD_ACTIVE_MODE_THRESHOLD_MS=1000
+
+
+# mDNS Configuration (Use Thread SRP/DNS instead of Minimal mDNS)
+CONFIG_USE_MINIMAL_MDNS=n
+CONFIG_ENABLE_CHIP_SHELL=y
+CONFIG_ENABLE_EXTENDED_DISCOVERY=y
+CONFIG_OPENTHREAD_DNS_CLIENT=y
+
+# Boot & Log Optimization
+# Ensure we see crash logs but minimize debug noise for speed
+CONFIG_ESP_SYSTEM_PANIC_PRINT_HALT=y
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+CONFIG_LOG_DEFAULT_LEVEL=3
+CONFIG_CHIP_LOG_DEFAULT_LEVEL=3
+CONFIG_BOOTLOADER_LOG_LEVEL_INFO=y
+CONFIG_BOOTLOADER_SKIP_VALIDATE_ALWAYS=y
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y
+
+# CRITICAL: EventFD required for OpenThread stability on ESP32-C6
+CONFIG_ESP_EVENTFD=y
+CONFIG_VFS_SUPPORT_SELECT=y
+
+# STABILITY: Disable Brownout Detector (~2.5V reset threshold)
+CONFIG_ESP_BROWNOUT_DET=n
+
+# Task Watchdog Configuration (Matter init takes ~10 seconds)
+CONFIG_TASK_WDT_TIMEOUT_S=30
+CONFIG_TASK_WDT_CHECK_IDLE_TASK_CPU0=n
+
+# PHY Calibration: Use Partial calibration (faster, less prone to hangs) but ensure storage is enabled
+# to maintain tuning across resets.
+CONFIG_ESP_PHY_CALIBRATION_MODE_PARTIAL=n
+CONFIG_ESP_PHY_CALIBRATION_AND_DATA_STORAGE=y
+
+# Network Commissioning Endpoint IDs (CRITICAL for dual-stack)
+# Prioritize Thread by putting it on the Root Endpoint (0).
+# Wi-Fi is available on the Secondary Endpoint (1).
+CONFIG_THREAD_NETWORK_ENDPOINT_ID=0
+# CONFIG_WIFI_NETWORK_ENDPOINT_ID is not set
+
+
+# Dynamic endpoint configuration
+CONFIG_ESP_MATTER_MAX_DYNAMIC_ENDPOINT_COUNT=16
+
+# LwIP config for OpenThread and Wi-Fi
+CONFIG_LWIP_IPV6_NUM_ADDRESSES=8
+CONFIG_LWIP_MULTICAST_PING=y
+
+# Enable lwip ipv6 autoconfig (required for Wi-Fi + Matter)
+# REVERTED to 'n' based on official dual-stack example and regression in commissioning.
+CONFIG_LWIP_IPV6_AUTOCONFIG=n
+
+# LwIP IPv4 and ND6 (Disabled for Thread-only MTD)
+CONFIG_LWIP_IPV4=y
+CONFIG_DISABLE_IPV4=n
+CONFIG_LWIP_ND6=y
+
+
+
+# Custom Providers
+CONFIG_EXAMPLE_DEVICE_INSTANCE_INFO_PROVIDER=n
+CONFIG_CUSTOM_DEVICE_INSTANCE_INFO_PROVIDER=y
+

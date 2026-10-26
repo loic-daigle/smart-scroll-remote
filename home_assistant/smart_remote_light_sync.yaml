@@ -1,0 +1,236 @@
+blueprint:
+  name: Smart Scroll Remote ⇄ Light Sync
+  description: >
+    Keeps one channel of the Smart Scroll Remote (a Matter light entity) and a real light or group in sync,
+    in both directions, with as little delay as possible.
+
+    - Remote → light: sent immediately, no debounce. While the dial turns, intermediate values are skipped
+      automatically and the light always ends on the latest value.
+    - Light → remote: follows changes made elsewhere (app, voice, other automations), but the remote has
+      priority for a short window after you touch it.
+    - No ping-pong: nothing is sent when the other side already matches.
+    - No surprise changes when the remote or Home Assistant reconnects: when the remote comes back online,
+      it is updated from the light (never the other way round).
+    - Colour temperature is clamped to what the receiving light supports.
+    - Optional: actions for double / triple / 4 / 5 clicks made inside this channel's menu on the remote.
+
+    Create one automation per remote channel. Requires Home Assistant 2024.10 or newer.
+  domain: automation
+  source_url: https://github.com/The-Young-Maker/smart-scroll-remote/blob/main/home_assistant/smart_remote_light_sync.yaml
+  input:
+    remote_light:
+      name: Remote channel
+      description: The Smart Scroll Remote light entity for this channel.
+      selector:
+        entity:
+          domain: light
+    target_light:
+      name: Light or group
+      description: The real light (or light group) this channel controls.
+      selector:
+        entity:
+          domain: light
+    remote_priority_seconds:
+      name: Remote priority window
+      description: >
+        After the remote changes, changes coming from the light are ignored for this long. This absorbs
+        delayed state echoes from cloud lights (e.g. Tuya). Lower = the remote follows the app sooner.
+      default: 6
+      selector:
+        number:
+          min: 1
+          max: 30
+          step: 1
+          unit_of_measurement: s
+    multi_click:
+      name: Multi-click actions (optional)
+      icon: mdi:gesture-double-tap
+      collapsed: true
+      input:
+        click_event:
+          name: Channel click entity
+          description: >
+            The remote's event entity for this channel (one Generic Switch per channel, the 3 event entities
+            after the lights). Double/triple/... clicks made inside this channel's menu arrive here.
+          default: []
+          selector:
+            entity:
+              domain: event
+        double_click_action:
+          name: Double click
+          default: []
+          selector:
+            action: {}
+        triple_click_action:
+          name: Triple click
+          default: []
+          selector:
+            action: {}
+        quad_click_action:
+          name: 4 clicks
+          default: []
+          selector:
+            action: {}
+        quint_click_action:
+          name: 5 clicks
+          default: []
+          selector:
+            action: {}
+
+# Queued with room for exactly one waiting run. Every run reads the *current* state of the source when it
+# starts (not the trigger snapshot), so if triggers are dropped while one run is waiting, that waiting run
+# still applies the newest value. Result: no artificial delay, no backlog, latest value always wins.
+# (restart mode is avoided on purpose: it can cancel a cloud call that is already in flight.)
+# max 4 leaves room for a click while a sync is running; extra sync runs are no-ops (destination matches).
+mode: queued
+max: 4
+max_exceeded: silent
+
+triggers:
+  - trigger: state
+    entity_id: !input remote_light
+    id: remote
+  - trigger: state
+    entity_id: !input target_light
+    id: target
+  # Remote back online (e.g. after deep sleep): catch it up with whatever changed while it was away.
+  - trigger: state
+    entity_id: !input remote_light
+    from: ["unavailable", "unknown"]
+    to: ["on", "off"]
+    id: remote_back
+  - trigger: state
+    entity_id: !input click_event
+    id: click
+
+variables:
+  remote_entity: !input remote_light
+  target_entity: !input target_light
+  priority_s: !input remote_priority_seconds
+
+conditions:
+  # Only real on/off ⇄ on/off changes of light values. Skips unavailable/unknown transitions, which would
+  # otherwise push stale values when a device or Home Assistant reconnects.
+  - condition: template
+    value_template: >
+      {% set f = trigger.from_state %}
+      {% set t = trigger.to_state %}
+      {% set dead = ['unavailable', 'unknown'] %}
+      {{ (trigger.id == 'click' and f is not none and t is not none
+          and f.state not in dead and t.state not in dead) or
+         trigger.id == 'remote_back' or
+         f is not none and t is not none
+         and f.state in ['on', 'off'] and t.state in ['on', 'off']
+         and (f.state != t.state
+              or f.attributes.get('brightness') != t.attributes.get('brightness')
+              or f.attributes.get('color_mode') != t.attributes.get('color_mode')
+              or f.attributes.get('color_temp_kelvin') != t.attributes.get('color_temp_kelvin')
+              or f.attributes.get('hs_color') != t.attributes.get('hs_color')) }}
+
+actions:
+  # Multi-click on this channel: run the matching action and stop (no light sync for this run).
+  # The "unavailable/unknown" guard above stops a restored event state from replaying an old click.
+  - if: "{{ trigger.id == 'click' }}"
+    then:
+      - choose:
+          - conditions: "{{ trigger.to_state.attributes.get('event_type') == 'multi_press_2' }}"
+            sequence: !input double_click_action
+          - conditions: "{{ trigger.to_state.attributes.get('event_type') == 'multi_press_3' }}"
+            sequence: !input triple_click_action
+          - conditions: "{{ trigger.to_state.attributes.get('event_type') == 'multi_press_4' }}"
+            sequence: !input quad_click_action
+          - conditions: "{{ trigger.to_state.attributes.get('event_type') == 'multi_press_5' }}"
+            sequence: !input quint_click_action
+      - stop: Click handled
+
+  - variables:
+      from_remote: "{{ trigger.id == 'remote' }}"
+      src: "{{ remote_entity if from_remote else target_entity }}"
+      dst: "{{ target_entity if from_remote else remote_entity }}"
+
+  # The remote has priority: ignore light → remote while the remote was touched recently.
+  - condition: template
+    value_template: >
+      {{ from_remote or trigger.id == 'remote_back' or
+         (now() - states[remote_entity].last_updated).total_seconds() > priority_s | float(6) }}
+
+  # Read the live source state (see mode comment above) and the destination state.
+  - variables:
+      src_state: "{{ states(src) }}"
+      src_bri: "{{ state_attr(src, 'brightness') | int(0) }}"
+      src_mode: "{{ state_attr(src, 'color_mode') }}"
+      src_k: "{{ state_attr(src, 'color_temp_kelvin') }}"
+      src_hs: "{{ state_attr(src, 'hs_color') | list if state_attr(src, 'hs_color') else none }}"
+      dst_state: "{{ states(dst) }}"
+      dst_bri: "{{ state_attr(dst, 'brightness') | int(0) }}"
+      dst_k: "{{ state_attr(dst, 'color_temp_kelvin') }}"
+      dst_hs: "{{ state_attr(dst, 'hs_color') | list if state_attr(dst, 'hs_color') else none }}"
+      want_ct: "{{ src_mode in ['color_temp', 'white'] and src_k is not none }}"
+      want_hs: "{{ src_mode in ['hs', 'rgb', 'xy', 'rgbw', 'rgbww'] and src_hs is not none }}"
+      kelvin: >
+        {% set lo = state_attr(dst, 'min_color_temp_kelvin') | int(2000) %}
+        {% set hi = state_attr(dst, 'max_color_temp_kelvin') | int(6500) %}
+        {{ [[src_k | int(4000), lo] | max, hi] | min }}
+      brightness: "{{ [src_bri, 1] | max }}"
+
+  # Valid source state, and only send when the destination doesn't already match (stops ping-pong and
+  # rounding echoes between Matter's 0-254 and Tuya's own scales).
+  - condition: template
+    value_template: >
+      {% if src_state not in ['on', 'off'] or dst_state not in ['on', 'off'] %}
+        false
+      {% elif src_state == 'off' %}
+        {{ dst_state != 'off' }}
+      {% elif dst_state != 'on' %}
+        true
+      {% else %}
+        {% set bri_diff = (brightness - dst_bri) | abs > 3 %}
+        {% if want_ct %}
+          {% set col_diff = dst_k is none or (kelvin | int - dst_k | int) | abs > 60 %}
+        {% elif want_hs %}
+          {% if dst_hs is none %}
+            {% set col_diff = true %}
+          {% else %}
+            {% set dh = (src_hs[0] | float - dst_hs[0] | float) | abs %}
+            {% set dh = [dh, 360 - dh] | min %}
+            {% set col_diff = dh > 2 or (src_hs[1] | float - dst_hs[1] | float) | abs > 3 %}
+          {% endif %}
+        {% else %}
+          {% set col_diff = false %}
+        {% endif %}
+        {{ bri_diff or col_diff }}
+      {% endif %}
+
+  - choose:
+      - conditions: "{{ src_state == 'off' }}"
+        sequence:
+          - action: light.turn_off
+            target:
+              entity_id: "{{ dst }}"
+
+      - conditions: "{{ want_ct }}"
+        sequence:
+          - action: light.turn_on
+            target:
+              entity_id: "{{ dst }}"
+            data:
+              brightness: "{{ brightness }}"
+              color_temp_kelvin: "{{ kelvin }}"
+
+      - conditions: "{{ want_hs }}"
+        sequence:
+          - action: light.turn_on
+            target:
+              entity_id: "{{ dst }}"
+            data:
+              brightness: "{{ brightness }}"
+              hs_color:
+                - "{{ src_hs[0] | float }}"
+                - "{{ src_hs[1] | float }}"
+
+    default:
+      - action: light.turn_on
+        target:
+          entity_id: "{{ dst }}"
+        data:
+          brightness: "{{ brightness }}"

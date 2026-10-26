@@ -1,0 +1,67 @@
+/*
+ * CHIPProjectConfig.h
+ * Custom Matter device identity configuration for Smart Button
+ * 
+ * NOTE: VID must be 0xFFF1 and PID must be in range 0x8000-0x801F 
+ * to use the example attestation certificates for development.
+ */
+
+#pragma once
+
+// Override default device identity
+// Use test VID (0xFFF1) and test PID range (0x8000-0x801F) for development
+#ifndef CHIP_DEVICE_CONFIG_DEVICE_VENDOR_ID
+#define CHIP_DEVICE_CONFIG_DEVICE_VENDOR_ID 0xFFF1
+#endif
+
+#ifndef CHIP_DEVICE_CONFIG_DEVICE_PRODUCT_ID
+#define CHIP_DEVICE_CONFIG_DEVICE_PRODUCT_ID 0x8001
+#endif
+
+// Transport Configuration - Auto-detected from Kconfig/Personality Selection
+// #undef CHIP_DEVICE_CONFIG_ENABLE_WIFI_STATION
+// #undef CHIP_DEVICE_CONFIG_ENABLE_THREAD
+
+// Disable auto-start to allow manual personality configuration before commissioning
+#ifdef CHIP_DEVICE_CONFIG_ENABLE_PAIRING_AUTOSTART
+#undef CHIP_DEVICE_CONFIG_ENABLE_PAIRING_AUTOSTART
+#endif
+#define CHIP_DEVICE_CONFIG_ENABLE_PAIRING_AUTOSTART 0
+
+#ifdef CHIP_DEVICE_CONFIG_ENABLE_THREAD_AUTOSTART
+#undef CHIP_DEVICE_CONFIG_ENABLE_THREAD_AUTOSTART
+#endif
+#define CHIP_DEVICE_CONFIG_ENABLE_THREAD_AUTOSTART 0
+
+// Undefine generic test values before redefining to avoid warnings
+#ifdef CHIP_DEVICE_CONFIG_DEVICE_VENDOR_NAME
+#undef CHIP_DEVICE_CONFIG_DEVICE_VENDOR_NAME
+#endif
+#define CHIP_DEVICE_CONFIG_DEVICE_VENDOR_NAME "Loic Daigle"
+
+#ifdef CHIP_DEVICE_CONFIG_DEVICE_PRODUCT_NAME
+#undef CHIP_DEVICE_CONFIG_DEVICE_PRODUCT_NAME
+#endif
+#define CHIP_DEVICE_CONFIG_DEVICE_PRODUCT_NAME "Smart Scroll Remote"
+
+#ifdef CHIP_DEVICE_CONFIG_DEFAULT_DEVICE_HARDWARE_VERSION_STRING
+#undef CHIP_DEVICE_CONFIG_DEFAULT_DEVICE_HARDWARE_VERSION_STRING
+#endif
+#define CHIP_DEVICE_CONFIG_DEFAULT_DEVICE_HARDWARE_VERSION_STRING "v1.0"
+
+#ifndef CHIP_DEVICE_CONFIG_DEVICE_SOFTWARE_VERSION_STRING
+#define CHIP_DEVICE_CONFIG_DEVICE_SOFTWARE_VERSION_STRING "1.0.0"
+#endif
+
+#ifndef CHIP_DEVICE_CONFIG_DEFAULT_DEVICE_HARDWARE_VERSION
+#define CHIP_DEVICE_CONFIG_DEFAULT_DEVICE_HARDWARE_VERSION 1
+#endif
+
+// Use test setup parameters for easy development pairing
+#ifndef CHIP_DEVICE_CONFIG_USE_TEST_SETUP_PIN_CODE
+#define CHIP_DEVICE_CONFIG_USE_TEST_SETUP_PIN_CODE 20202021
+#endif
+
+#ifndef CHIP_DEVICE_CONFIG_USE_TEST_SETUP_DISCRIMINATOR
+#define CHIP_DEVICE_CONFIG_USE_TEST_SETUP_DISCRIMINATOR 0xF00
+#endif
