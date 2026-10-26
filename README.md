@@ -70,7 +70,7 @@ Tested with:
 export ESP_MATTER_PATH=~/esp-matter
 . $ESP_MATTER_PATH/export.sh
 
-git clone https://github.com/The-Young-Maker/smart-scroll-remote.git
+git clone https://github.com/loic-daigle/smart-scroll-remote.git
 cd smart-scroll-remote
 idf.py build
 idf.py -p <PORT> flash monitor
@@ -119,7 +119,7 @@ matter esp factory_reset        # forget all fabrics and reopen commissioning
 
 ## Home Assistant
 
-[![Open your Home Assistant instance and show the blueprint import dialog.](https://my.home-assistant.io/badges/blueprint_import.svg)](https://my.home-assistant.io/redirect/blueprint_import/?blueprint_url=https%3A%2F%2Fgithub.com%2FThe-Young-Maker%2Fsmart-scroll-remote%2Fblob%2Fmain%2Fhome_assistant%2Fsmart_remote_light_sync.yaml)
+[![Open your Home Assistant instance and show the blueprint import dialog.](https://my.home-assistant.io/badges/blueprint_import.svg)](https://my.home-assistant.io/redirect/blueprint_import/?blueprint_url=https%3A%2F%2Fgithub.com%2Floic-daigle%2Fsmart-scroll-remote%2Fblob%2Fmain%2Fhome_assistant%2Fsmart_remote_light_sync.yaml)
 
 [`home_assistant/smart_remote_light_sync.yaml`](home_assistant/smart_remote_light_sync.yaml) keeps one remote channel and one real light or group in sync. Create **one automation per channel**.
 

@@ -177,7 +177,7 @@ public:
     CHIP_ERROR GetProductName(char * buf, size_t bufSize) override { chip::Platform::CopyString(buf, bufSize, "Smart Scroll Remote"); return CHIP_NO_ERROR; }
     CHIP_ERROR GetProductId(uint16_t & productId) override { productId = 0x8001; return CHIP_NO_ERROR; }
     CHIP_ERROR GetPartNumber(char * buf, size_t bufSize) override { chip::Platform::CopyString(buf, bufSize, "SSR-001"); return CHIP_NO_ERROR; }
-    CHIP_ERROR GetProductURL(char * buf, size_t bufSize) override { chip::Platform::CopyString(buf, bufSize, "https://github.com/The-Young-Maker/smart-scroll-remote"); return CHIP_NO_ERROR; }
+    CHIP_ERROR GetProductURL(char * buf, size_t bufSize) override { chip::Platform::CopyString(buf, bufSize, "https://github.com/loic-daigle/smart-scroll-remote"); return CHIP_NO_ERROR; }
     CHIP_ERROR GetProductLabel(char * buf, size_t bufSize) override { chip::Platform::CopyString(buf, bufSize, "Smart Scroll Remote"); return CHIP_NO_ERROR; }
     CHIP_ERROR GetSerialNumber(char * buf, size_t bufSize) override { chip::Platform::CopyString(buf, bufSize, "SN12345678"); return CHIP_NO_ERROR; }
     CHIP_ERROR GetManufacturingDate(uint16_t & year, uint8_t & month, uint8_t & day) override { year = 2026; month = 4; day = 6; return CHIP_NO_ERROR; }

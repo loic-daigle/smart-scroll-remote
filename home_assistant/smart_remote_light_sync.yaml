@@ -16,7 +16,7 @@ blueprint:
 
     Create one automation per remote channel. Requires Home Assistant 2024.10 or newer.
   domain: automation
-  source_url: https://github.com/The-Young-Maker/smart-scroll-remote/blob/main/home_assistant/smart_remote_light_sync.yaml
+  source_url: https://github.com/loic-daigle/smart-scroll-remote/blob/main/home_assistant/smart_remote_light_sync.yaml
   input:
     remote_light:
       name: Remote channel
