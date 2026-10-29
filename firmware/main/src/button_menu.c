@@ -1,4 +1,5 @@
 #include "button_menu.h"
+#include "matter.h"
 #include "driver/gpio.h"
 #include "esp_log.h"
 #include "nvs.h"
@@ -107,6 +108,12 @@ void menu_system_init(menu_system_t *menu) {
 }
 
 void menu_system_load_from_nvs(menu_system_t *menu) {
+    // Last selected channel: restored on every boot (any reset reason), not only after deep sleep.
+    uint32_t ch = 0;
+    if (nvs_get_u32(app_nvs_handle, "cur_ch", &ch) == ESP_OK && ch < 3) {
+        menu->currentChannel = (uint8_t)ch;
+    }
+
     for (int i = 0; i < 3; i++) {
         char key[16];
 
@@ -137,9 +144,9 @@ void menu_system_load_from_nvs(menu_system_t *menu) {
 }
 
 void menu_system_save_to_nvs(menu_system_t *menu) {
-    esp_err_t err = ESP_OK;
+    esp_err_t err = nvs_set_u32(app_nvs_handle, "cur_ch", menu->currentChannel);
 
-    for (int i = 0; i < 3; i++) {
+    for (int i = 0; i < 3 && err == ESP_OK; i++) {
         char key[16];
 
         snprintf(key, sizeof(key), "ch%d_int", i);
@@ -213,11 +220,13 @@ uint32_t menu_system_get_channel_color(menu_system_t *menu, uint8_t ch, bool for
 
     // PREVIEW LOGIC: If we are actively in a sub-menu for this channel, 
     // prioritize showing the relevant preview (White for CCT, Rainbow for RGB).
+    channel_type_t type = matter_get_channel_type(ch);
     bool showRainbow = menu->isRainbowMode[ch];
     if (menu->currentChannel == ch) {
         if (menu->currentState == IN_CHANNEL_RAINBOW) showRainbow = true;
         if (menu->currentState == IN_CHANNEL_COLOR_TEMP) showRainbow = false;
     }
+    if (type != CHANNEL_TYPE_COLOR) showRainbow = false;
 
     if (showRainbow) {
         uint32_t rgb = hsv_to_rgb(menu->rainbowHue[ch], 255, 255);
@@ -225,19 +234,23 @@ uint32_t menu_system_get_channel_color(menu_system_t *menu, uint8_t ch, bool for
         g_base = (rgb >> 8) & 0xFF;
         b_base = rgb & 0xFF;
     } else {
-        int val = menu->colorTemp[ch];
+        // Channels without colour temperature show a fixed neutral white
+        int val = (type == CHANNEL_TYPE_WHITE || type == CHANNEL_TYPE_COLOR) ? menu->colorTemp[ch] : 40;
         // Refined Curves: 0% (6500K) -> Vibrant Blue-White, 100% (2000K) -> Rich Amber
         r_base = 120 + (val * 135) / 100;   // 120(Cool) -> 255(Warm)
         g_base = 150 - (val * 50) / 100;    // 150(Cool) -> 100(Warm)
         b_base = 255 - (val * 240) / 100;   // 255(Cool) -> 15(Warm)
     }
 
+    int intensity = menu->intensity[ch];
+    if (type == CHANNEL_TYPE_ON_OFF && intensity > 0) intensity = 100;
+
     float factor;
     if (forceVis) {
-        int display_intensity = (menu->intensity[ch] < 20) ? 20 : menu->intensity[ch];
+        int display_intensity = (intensity < 20) ? 20 : intensity;
         factor = display_intensity / 100.0f;
     } else {
-        factor = menu->intensity[ch] / 100.0f;
+        factor = intensity / 100.0f;
     }
 
     uint8_t r = (uint8_t)(r_base * factor);
@@ -278,6 +291,11 @@ void menu_system_handle_encoder(menu_system_t *menu, int currentVal) {
                 break;
 
             case IN_CHANNEL_INTENSITY: {
+                if (matter_get_channel_type(menu->currentChannel) == CHANNEL_TYPE_ON_OFF) {
+                    // On/Off channel: turning up switches on, turning down switches off
+                    menu->intensity[menu->currentChannel] = (dir > 0) ? 100 : 0;
+                    break;
+                }
                 int nextVal = (int)menu->intensity[menu->currentChannel] + dir * 5;
                 if (nextVal > 100) nextVal = 100;
                 if (nextVal < 0) nextVal = 0;
@@ -335,6 +353,18 @@ void menu_system_handle_button(menu_system_t *menu, int event) {
             return;
         }
 
+        channel_type_t type = matter_get_channel_type(menu->currentChannel);
+        if (menu->currentState != MENU_SELECT_CHANNEL && type == CHANNEL_TYPE_ON_OFF) {
+            // On/Off channel: a click toggles (published by the menu task like a dial change)
+            menu->intensity[menu->currentChannel] = (menu->intensity[menu->currentChannel] > 0) ? 0 : 100;
+            menu->lastActivityTime = get_millis();
+            menu_system_notify_interaction(menu->currentChannel);
+            return;
+        }
+        if (menu->currentState != MENU_SELECT_CHANNEL && type == CHANNEL_TYPE_DIMMABLE) {
+            return;  // intensity is the only page
+        }
+
         flash_transition();
         switch (menu->currentState) {
             case MENU_SELECT_CHANNEL:
@@ -344,7 +374,7 @@ void menu_system_handle_button(menu_system_t *menu, int event) {
                 menu->currentState = IN_CHANNEL_COLOR_TEMP;
                 break;
             case IN_CHANNEL_COLOR_TEMP:
-                menu->currentState = IN_CHANNEL_RAINBOW;
+                menu->currentState = (type == CHANNEL_TYPE_COLOR) ? IN_CHANNEL_RAINBOW : IN_CHANNEL_INTENSITY;
                 break;
             case IN_CHANNEL_RAINBOW:
                 menu->currentState = IN_CHANNEL_INTENSITY;

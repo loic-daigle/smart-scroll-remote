@@ -17,6 +17,7 @@
 #include <platform/ThreadStackManager.h>
 #endif
 #include <app/clusters/color-control-server/color-control-server.h>
+#include <app/clusters/mode-select-server/supported-modes-manager.h>
 #include <app-common/zap-generated/cluster-objects.h>
 #include <app/ClusterCallbacks.h>
 #include <lib/support/TypeTraits.h>
@@ -270,30 +271,8 @@ using namespace chip::app::Clusters;
 static uint16_t switch_endpoint_id = 0;
 static uint16_t light_endpoint_ids[3] = {0};
 static uint16_t channel_switch_endpoint_ids[3] = {0};
-static uint16_t sleep_timeout_val = 600; 
-
-static uint32_t hsv_to_rgb(uint16_t h, uint8_t s, uint8_t v)
-{
-    float hf = h / 360.0f; float sf = s / 254.0f; float vf = v / 254.0f;
-    int i = (int)(hf * 6.0f); float f = hf * 6.0f - (float)i;
-    float p = vf * (1.0f - sf); float q = vf * (1.0f - f * sf); float t = vf * (1.0f - (1.0f - f) * sf);
-    float r = 0, g = 0, b = 0;
-    switch (i % 6) {
-        case 0: r = vf; g = t;  b = p;  break;
-        case 1: r = q;  g = vf; b = p;  break;
-        case 2: r = p;  g = vf; b = t;  break;
-        case 3: r = p;  g = q;  b = vf; break;
-        case 4: r = t;  g = p;  b = vf; break;
-        case 5: r = vf; g = p;  b = q;  break;
-    }
-    return ((uint32_t)(r * 255.0f) << 16) | ((uint32_t)(g * 255.0f) << 8) | (uint32_t)(b * 255.0f);
-}
-
-// ============ Utility Functions ============
-// Simple map function for value scaling
-static inline int map(int value, int fromLow, int fromHigh, int toLow, int toHigh) {
-    return (value - fromLow) * (toHigh - toLow) / (fromHigh - fromLow) + toLow;
-}
+static uint16_t channel_type_endpoint_ids[3] = {0};
+static uint16_t deep_sleep_endpoint_id = 0;
 
 // Default stub if not provided
 static void stub_updateIntensity(uint8_t ch, uint8_t val) {}
@@ -317,12 +296,119 @@ struct {
     uint8_t brightness;     // 0-254 (Level Control)
     uint8_t colorTemp;      // 0-100 (stored as Mireds internally: 153=6500K cold, 500=2000K warm)
     bool rainbowMode;       // True if in color mode, False if in temp mode
-    bool changed;           // Flag for HSV→RGB updates
 } light_config[3] = {
-    {120, 254, 127, 50, false, false},
-    {240, 254, 127, 50, false, false},
-    {60, 254, 127, 50, false, false},
+    {120, 254, 127, 50, false},
+    {240, 254, 127, 50, false},
+    {60, 254, 127, 50, false},
 };
+
+// ============ Settings shown as selects in the controller (Mode Select endpoints) ============
+// Channel type: one endpoint per channel, mode values are the channel_type_t values.
+static uint8_t channel_types[3] = {CHANNEL_TYPE_COLOR, CHANNEL_TYPE_COLOR, CHANNEL_TYPE_COLOR};
+static bool channel_types_loaded = false;
+// On/Off channels: the light's brightness to report when switched on from the remote
+static uint8_t on_off_level[3] = {254, 254, 254};
+
+static void load_channel_types()
+{
+    if (channel_types_loaded) return;
+    ensure_nvs_open();
+    for (int i = 0; i < 3 && matter_nvs_handle != 0; i++) {
+        char key[12];
+        snprintf(key, sizeof(key), "ch_type%d", i);
+        uint8_t v = 0;
+        if (nvs_get_u8(matter_nvs_handle, key, &v) == ESP_OK && v < CHANNEL_TYPE_COUNT) {
+            channel_types[i] = v;
+        }
+    }
+    channel_types_loaded = true;
+}
+
+static void save_channel_type(int i)
+{
+    if (matter_nvs_handle == 0) return;
+    char key[12];
+    snprintf(key, sizeof(key), "ch_type%d", i);
+    esp_err_t err = nvs_set_u8(matter_nvs_handle, key, channel_types[i]);
+    if (err == ESP_OK) err = nvs_commit(matter_nvs_handle);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to persist channel %d type: %s", i + 1, esp_err_to_name(err));
+    }
+}
+
+extern "C" channel_type_t matter_get_channel_type(uint8_t channel)
+{
+    load_channel_types();
+    return (channel < 3) ? (channel_type_t)channel_types[channel] : CHANNEL_TYPE_COLOR;
+}
+
+// Deep sleep: after this much inactivity the remote leaves the network and deep-sleeps (it is then
+// unavailable in the controller until the dial or button wakes it). Mode value = index in this table.
+static const uint32_t k_deep_sleep_ms[] = {10 * 60000, 30 * 60000, 60 * 60000, 4 * 3600000, 12 * 3600000, 0};
+static const char *k_deep_sleep_labels[] = {"10 min", "30 min", "1 h", "4 h", "12 h", "Never"};
+static constexpr uint8_t k_deep_sleep_count = sizeof(k_deep_sleep_ms) / sizeof(k_deep_sleep_ms[0]);
+static uint8_t deep_sleep_mode = 2;  // 1 h
+
+static void load_deep_sleep_mode()
+{
+    uint8_t v = 0;
+    if (matter_nvs_handle != 0 && nvs_get_u8(matter_nvs_handle, "deep_sleep", &v) == ESP_OK && v < k_deep_sleep_count) {
+        deep_sleep_mode = v;
+    }
+}
+
+static void save_deep_sleep_mode()
+{
+    if (matter_nvs_handle == 0) return;
+    esp_err_t err = nvs_set_u8(matter_nvs_handle, "deep_sleep", deep_sleep_mode);
+    if (err == ESP_OK) err = nvs_commit(matter_nvs_handle);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to persist deep sleep setting: %s", esp_err_to_name(err));
+    }
+}
+
+extern "C" uint32_t matter_get_deep_sleep_ms(void) { return k_deep_sleep_ms[deep_sleep_mode]; }
+
+// Options of every select. The Mode Select server keeps a single manager for all endpoints.
+class SettingsModesManager : public ModeSelect::SupportedModesManager
+{
+    using ModeOption = ModeSelect::Structs::ModeOptionStruct::Type;
+
+public:
+    SettingsModesManager()
+    {
+        static const char *labels[CHANNEL_TYPE_COUNT] = {"On/Off", "Dimmable", "Dimmable + white", "Dimmable + colour"};
+        for (uint8_t m = 0; m < CHANNEL_TYPE_COUNT; m++) {
+            mChannelType[m].label = chip::CharSpan::fromCharString(labels[m]);
+            mChannelType[m].mode = m;
+        }
+        for (uint8_t m = 0; m < k_deep_sleep_count; m++) {
+            mDeepSleep[m].label = chip::CharSpan::fromCharString(k_deep_sleep_labels[m]);
+            mDeepSleep[m].mode = m;
+        }
+    }
+
+    ModeOptionsProvider getModeOptionsProvider(chip::EndpointId endpointId) const override
+    {
+        if (endpointId == deep_sleep_endpoint_id) return ModeOptionsProvider(mDeepSleep, mDeepSleep + k_deep_sleep_count);
+        return ModeOptionsProvider(mChannelType, mChannelType + CHANNEL_TYPE_COUNT);
+    }
+
+    chip::Protocols::InteractionModel::Status getModeOptionByMode(chip::EndpointId endpointId, uint8_t mode,
+                                                                  const ModeOption **dataPtr) const override
+    {
+        ModeOptionsProvider options = getModeOptionsProvider(endpointId);
+        if (mode >= options.end() - options.begin()) return chip::Protocols::InteractionModel::Status::InvalidCommand;
+        *dataPtr = options.begin() + mode;
+        return chip::Protocols::InteractionModel::Status::Success;
+    }
+
+private:
+    ModeOption mChannelType[CHANNEL_TYPE_COUNT];
+    ModeOption mDeepSleep[k_deep_sleep_count];
+};
+
+static SettingsModesManager gSettingsModesManager;
 
 static bool is_commissioned_cached = false;
 static bool commissioned_cached_valid = false;
@@ -376,81 +462,172 @@ static void app_event_cb(const ChipDeviceEvent *event, intptr_t arg)
     }
 }
 
+// ============ Controller -> remote attribute handling ============
+// Exact round-trip conversions (rounded both ways): an echo of a value the remote published converts back to
+// exactly the same %, so it can be recognised as "already applied" by comparing with light_config.
+static inline uint8_t pct_to_level(uint8_t pct) { return (uint8_t)(1 + ((uint32_t)pct * 253 + 50) / 100); }
+static inline uint8_t level_to_pct(uint8_t level)
+{
+    uint8_t pct = (uint8_t)(((uint32_t)(level > 0 ? level - 1 : 0) * 100 + 126) / 253);
+    return pct > 100 ? 100 : pct;
+}
+static inline uint16_t pct_to_mireds(uint8_t pct) { return (uint16_t)(153 + ((uint32_t)pct * 347 + 50) / 100); }
+static inline uint8_t mireds_to_pct(uint16_t mireds)
+{
+    if (mireds < 153) mireds = 153;
+    if (mireds > 500) mireds = 500;
+    return (uint8_t)(((uint32_t)(mireds - 153) * 100 + 173) / 347);
+}
+
+static bool catchup_pending[3] = {false, false, false};
+static bool catchup_timer_running = false;
+static void catchup_timer_cb(chip::System::Layer *layer, void *ctx);
+
+// Applies one light-endpoint attribute to the menu. light_config holds what the remote last published or
+// applied, so echoes of our own changes compare equal and are ignored. While the user is touching the channel
+// (locked out) a real change is not applied and light_config is left untouched; returns true so that a
+// catch-up re-reads the remote's own attributes once the user stops (otherwise the LEDs could stay stale).
+static bool apply_light_attribute(int i, uint32_t cluster_id, uint32_t attribute_id, const esp_matter_attr_val_t *val)
+{
+    bool locked_out = (menusys.isLockedOut && menusys.isLockedOut(i));
+    // Values the channel type doesn't use are ignored (the endpoint still accepts them)
+    channel_type_t type = (channel_type_t)channel_types[i];
+    bool has_level = (type != CHANNEL_TYPE_ON_OFF);
+    bool has_ct = (type == CHANNEL_TYPE_WHITE || type == CHANNEL_TYPE_COLOR);
+    bool has_hue = (type == CHANNEL_TYPE_COLOR);
+
+    if (cluster_id == LevelControl::Id && attribute_id == LevelControl::Attributes::CurrentLevel::Id) {
+        uint8_t level = val->val.u8;
+        if (!has_level) {
+            // Remember the light's brightness (synced from the controller while on) to restore it on "on".
+            // Level 1 is skipped: Matter drops the level to the minimum when the controller sends Off.
+            if (light_config[i].brightness > 0 && level > 1 && level != 0xFF) on_off_level[i] = level;
+            return false;
+        }
+        // While off (brightness 0) the level is kept and picked up when the channel turns on
+        if (light_config[i].brightness == 0 || level == 0 || level == light_config[i].brightness) return false;
+        if (locked_out) return true;
+        light_config[i].brightness = level;
+        menusys.updateIntensity(i, level_to_pct(level));
+    } else if (cluster_id == OnOff::Id && attribute_id == OnOff::Attributes::OnOff::Id) {
+        bool is_on = val->val.b;
+        bool current_on = (light_config[i].brightness > 0);
+        if (is_on == current_on) return false;
+        if (locked_out) return true;
+        if (!is_on) {
+            light_config[i].brightness = 0;
+            menusys.updateIntensity(i, 0);
+        } else {
+            // Turned on by the controller: use the level stored on the endpoint (it may have been set while off)
+            esp_matter_attr_val_t lv = esp_matter_invalid(NULL);
+            uint8_t level = 0;
+            if (!has_level) {
+                level = pct_to_level(100);
+            } else if (attribute::get_val(light_endpoint_ids[i], LevelControl::Id, LevelControl::Attributes::CurrentLevel::Id, &lv) == ESP_OK) {
+                level = lv.val.u8;
+            }
+            if (level == 0 || level == 0xFF) level = pct_to_level(50);
+            light_config[i].brightness = level;
+            menusys.updateIntensity(i, level_to_pct(level));
+        }
+    } else if (cluster_id == ColorControl::Id && attribute_id == ColorControl::Attributes::CurrentHue::Id) {
+        if (!has_hue) return false;
+        uint8_t matterHue = val->val.u8;
+        if (matterHue == light_config[i].hue && light_config[i].rainbowMode) return false;
+        if (locked_out) return true;
+        light_config[i].hue = matterHue;
+        light_config[i].rainbowMode = true;
+        menusys.updateRainbowHue(i, (uint8_t)(((uint16_t)matterHue * 255) / 254));  // Matter 0-254 -> internal 0-255
+        menusys.updateRainbowMode(i, true);
+    } else if (cluster_id == ColorControl::Id && attribute_id == ColorControl::Attributes::CurrentSaturation::Id) {
+        light_config[i].saturation = val->val.u8;
+    } else if (cluster_id == ColorControl::Id && attribute_id == ColorControl::Attributes::ColorTemperatureMireds::Id) {
+        if (!has_ct) return false;
+        uint8_t colorTemp = mireds_to_pct(val->val.u16);
+        if (colorTemp == light_config[i].colorTemp && !light_config[i].rainbowMode) return false;
+        if (locked_out) return true;
+        light_config[i].colorTemp = colorTemp;
+        light_config[i].rainbowMode = false;
+        menusys.updateColorTemp(i, colorTemp);
+        menusys.updateRainbowMode(i, false);
+    }
+    return false;
+}
+
+static void schedule_catchup(int i)
+{
+    catchup_pending[i] = true;
+    if (!catchup_timer_running) {
+        catchup_timer_running = true;
+        chip::DeviceLayer::SystemLayer().StartTimer(chip::System::Clock::Milliseconds32(1600), catchup_timer_cb, nullptr);
+    }
+}
+
+// Runs on the Matter task: re-reads this remote's OWN light attributes (no request to any light) for channels
+// whose controller reports were skipped, and applies whatever is still different.
+static void catchup_timer_cb(chip::System::Layer *layer, void *ctx)
+{
+    catchup_timer_running = false;
+    for (int i = 0; i < 3; i++) {
+        if (!catchup_pending[i] || light_endpoint_ids[i] == 0) continue;
+        if (menusys.isLockedOut && menusys.isLockedOut(i)) {
+            schedule_catchup(i);  // still in use: try again later
+            continue;
+        }
+        catchup_pending[i] = false;
+
+        esp_matter_attr_val_t v = esp_matter_invalid(NULL);
+        if (attribute::get_val(light_endpoint_ids[i], OnOff::Id, OnOff::Attributes::OnOff::Id, &v) == ESP_OK) {
+            apply_light_attribute(i, OnOff::Id, OnOff::Attributes::OnOff::Id, &v);
+        }
+        if (attribute::get_val(light_endpoint_ids[i], LevelControl::Id, LevelControl::Attributes::CurrentLevel::Id, &v) == ESP_OK) {
+            apply_light_attribute(i, LevelControl::Id, LevelControl::Attributes::CurrentLevel::Id, &v);
+        }
+        // ColorMode: 0 = hue/saturation, 1 = XY, 2 = colour temperature
+        uint8_t color_mode = 2;
+        if (attribute::get_val(light_endpoint_ids[i], ColorControl::Id, ColorControl::Attributes::ColorMode::Id, &v) == ESP_OK) {
+            color_mode = v.val.u8;
+        }
+        uint32_t color_attr = (color_mode == 2) ? ColorControl::Attributes::ColorTemperatureMireds::Id
+                                                : ColorControl::Attributes::CurrentHue::Id;
+        if (attribute::get_val(light_endpoint_ids[i], ColorControl::Id, color_attr, &v) == ESP_OK) {
+            apply_light_attribute(i, ColorControl::Id, color_attr, &v);
+        }
+    }
+}
+
 static esp_err_t app_attribute_update_cb(callback_type_t type, uint16_t endpoint_id, uint32_t cluster_id, uint32_t attribute_id, esp_matter_attr_val_t *val, void *priv_data)
 {
     if (type != POST_UPDATE) return ESP_OK;
     if (!val) return ESP_ERR_INVALID_ARG;
 
-    if (endpoint_id == switch_endpoint_id && cluster_id == LevelControl::Id && attribute_id == LevelControl::Attributes::OnOffTransitionTime::Id) {
-        sleep_timeout_val = val->val.u16;
-        if (matter_nvs_handle != 0) {
-            esp_err_t err = nvs_set_u16(matter_nvs_handle, "sleep_val", sleep_timeout_val);
-            if (err == ESP_OK) {
-                err = nvs_commit(matter_nvs_handle);
-            }
-            if (err != ESP_OK) {
-                ESP_LOGW(TAG, "Failed to persist sleep timeout: %s", esp_err_to_name(err));
-            }
+    if (endpoint_id == deep_sleep_endpoint_id && cluster_id == ModeSelect::Id &&
+        attribute_id == ModeSelect::Attributes::CurrentMode::Id) {
+        // Takes effect the next time the remote goes idle
+        if (val->val.u8 < k_deep_sleep_count && val->val.u8 != deep_sleep_mode) {
+            deep_sleep_mode = val->val.u8;
+            save_deep_sleep_mode();
+            ESP_LOGI(TAG, "Deep sleep after: %s", k_deep_sleep_labels[deep_sleep_mode]);
         }
+        return ESP_OK;
     }
 
     // Handle light endpoints (3 channels: 1, 2, 3 mapping to indices 0, 1, 2)
     for (int i = 0; i < 3; i++) {
+        if (endpoint_id == channel_type_endpoint_ids[i] && cluster_id == ModeSelect::Id &&
+            attribute_id == ModeSelect::Attributes::CurrentMode::Id) {
+            if (val->val.u8 < CHANNEL_TYPE_COUNT && val->val.u8 != channel_types[i]) {
+                channel_types[i] = val->val.u8;
+                if (channel_types[i] != CHANNEL_TYPE_COLOR) light_config[i].rainbowMode = false;
+                save_channel_type(i);
+                ESP_LOGI(TAG, "Channel %d type -> %u", i + 1, (unsigned)channel_types[i]);
+                if (menusys.channelTypeChanged) menusys.channelTypeChanged(i);
+            }
+            break;
+        }
         if (endpoint_id == light_endpoint_ids[i]) {
-            bool locked_out = (menusys.isLockedOut && menusys.isLockedOut(i));
-            if (cluster_id == LevelControl::Id && attribute_id == LevelControl::Attributes::CurrentLevel::Id) {
-                uint8_t newBrightness = val->val.u8;
-                if (light_config[i].brightness != newBrightness) {
-                    light_config[i].brightness = newBrightness;
-                    if (!locked_out) {
-                        menusys.updateIntensity(i, (uint16_t)newBrightness * 100 / 254);
-                    }
-                }
-            } else if (cluster_id == OnOff::Id && attribute_id == OnOff::Attributes::OnOff::Id) {
-                bool is_on = val->val.b;
-                bool current_on = (light_config[i].brightness > 0);
-                if (is_on != current_on) {
-                    if (!is_on) {
-                        if (!locked_out) {
-                            menusys.updateIntensity(i, 0);
-                        }
-                    } else {
-                        uint8_t intensity = (uint16_t)light_config[i].brightness * 100 / 254;
-                        if (intensity == 0) intensity = 50; 
-                        if (!locked_out) {
-                            menusys.updateIntensity(i, intensity);
-                        }
-                    }
-                }
-            } else if (cluster_id == ColorControl::Id) {
-                if (attribute_id == ColorControl::Attributes::CurrentHue::Id) {
-                    uint8_t matterHue = val->val.u8;
-                    if (light_config[i].hue != matterHue) {
-                        light_config[i].hue = matterHue;
-                        light_config[i].rainbowMode = true;
-                        uint8_t localHue = (uint8_t)(((uint16_t)matterHue * 255) / 254);  // Matter 0-254 -> internal 0-255
-                        if (!locked_out) {
-                            menusys.updateRainbowHue(i, (uint8_t)localHue);
-                            menusys.updateRainbowMode(i, true);
-                        }
-                    }
-                } else if (attribute_id == ColorControl::Attributes::CurrentSaturation::Id) {
-                    light_config[i].saturation = val->val.u8;
-                } else if (attribute_id == ColorControl::Attributes::ColorTemperatureMireds::Id) {
-                    uint16_t mireds = val->val.u16;
-                    if (mireds < 153) mireds = 153;
-                    if (mireds > 500) mireds = 500;
-                    uint8_t colorTemp = (mireds - 153) * 100 / (500 - 153);
-
-                    if (light_config[i].colorTemp != colorTemp || light_config[i].rainbowMode) {
-                        light_config[i].colorTemp = colorTemp;
-                        light_config[i].rainbowMode = false;
-                        if (!locked_out) {
-                            menusys.updateColorTemp(i, colorTemp);
-                            menusys.updateRainbowMode(i, false);
-                        }
-                    }
-                }
+            if (apply_light_attribute(i, cluster_id, attribute_id, val)) {
+                schedule_catchup(i);
             }
             break;
         }
@@ -534,15 +711,6 @@ static endpoint_t *create_switch_endpoint(node_t *node)
         }
     }
 
-    cluster_t *level_cluster = cluster::get(endpoint, LevelControl::Id);
-    if (!level_cluster) {
-        cluster::level_control::config_t level_config;
-        level_cluster = cluster::level_control::create(endpoint, &level_config, CLUSTER_FLAG_SERVER);
-    }
-    if (level_cluster) {
-        cluster::level_control::attribute::create_on_off_transition_time(level_cluster, sleep_timeout_val);
-    }
-
     return endpoint;
 }
 
@@ -617,17 +785,33 @@ ext_light_cfg.color_control_color_temperature.start_up_color_temperature_mireds 
     return endpoint;
 }
 
+// Channel type select, on its own Mode Select endpoint: Home Assistant's matter.js server ignores a Mode Select
+// cluster placed on a light endpoint (not part of the light device type). Shown as "Channel N type" (Description).
+static endpoint_t *create_channel_type_endpoint(node_t *node, uint8_t channel_idx)
+{
+    endpoint::mode_select::config_t cfg;
+    snprintf(cfg.mode_select.description, sizeof(cfg.mode_select.description), "Channel %d type", channel_idx + 1);
+    cfg.mode_select.current_mode = channel_types[channel_idx];
+    cfg.mode_select.delegate = &gSettingsModesManager;
+    return endpoint::mode_select::create(node, &cfg, ENDPOINT_FLAG_NONE, NULL);
+}
+
+static endpoint_t *create_deep_sleep_endpoint(node_t *node)
+{
+    endpoint::mode_select::config_t cfg;
+    snprintf(cfg.mode_select.description, sizeof(cfg.mode_select.description), "Deep sleep after");
+    cfg.mode_select.current_mode = deep_sleep_mode;
+    cfg.mode_select.delegate = &gSettingsModesManager;
+    return endpoint::mode_select::create(node, &cfg, ENDPOINT_FLAG_NONE, NULL);
+}
+
 
 extern "C" void matter_init(void)
 {
     esp_err_t err;
     ensure_nvs_open();
-    if (matter_nvs_handle != 0) {
-        err = nvs_get_u16(matter_nvs_handle, "sleep_val", &sleep_timeout_val);
-        if (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND) {
-            ESP_LOGW(TAG, "Failed to read sleep timeout from NVS: %s", esp_err_to_name(err));
-        }
-    }
+    load_channel_types();
+    load_deep_sleep_mode();
 
     current_personality = get_personality();
     if (current_personality == PERSONALITY_UNSET) {
@@ -676,6 +860,13 @@ extern "C" void matter_init(void)
         endpoint_t *ep = create_channel_switch_endpoint(node);
         if (ep) channel_switch_endpoint_ids[i] = endpoint::get_id(ep);
     }
+
+    for (int i = 0; i < 3; i++) {
+        endpoint_t *ep = create_channel_type_endpoint(node, i);
+        if (ep) channel_type_endpoint_ids[i] = endpoint::get_id(ep);
+    }
+    endpoint_t *ds_ep = create_deep_sleep_endpoint(node);
+    if (ds_ep) deep_sleep_endpoint_id = endpoint::get_id(ds_ep);
 
     esp_matter::set_custom_device_instance_info_provider(&gAppDeviceInstanceInfoProvider);
     // Must be set before the stack starts (before any GetDiagnosticDataProvider() call)
@@ -814,43 +1005,10 @@ extern "C" bool matter_is_transport_connected(void)
     return thread_connected;
 }
 
-extern "C" void matter_send_button_event(uint8_t press_count) {
-    if (switch_endpoint_id == 0) return;
-    chip::DeviceLayer::StackLock lock;
-    cluster::switch_cluster::event::send_multi_press_complete(switch_endpoint_id, 0, press_count);
-}
-
 extern "C" void matter_send_channel_multi_press(uint8_t channel, uint8_t press_count) {
     if (channel >= 3 || channel_switch_endpoint_ids[channel] == 0 || press_count == 0) return;
     chip::DeviceLayer::StackLock lock;
     cluster::switch_cluster::event::send_multi_press_complete(channel_switch_endpoint_ids[channel], 0, press_count);
-}
-
-extern "C" void matter_send_long_press(void) {
-    if (switch_endpoint_id == 0) return;
-    chip::DeviceLayer::StackLock lock;
-    cluster::switch_cluster::event::send_long_press(switch_endpoint_id, 0);
-}
-
-extern "C" void matter_update_colors(uint32_t *c1, uint32_t *c2, uint32_t *c3) {
-    uint32_t *colors[] = {c1, c2, c3};
-    for (int i = 0; i < 3; i++) {
-        if (light_config[i].changed && colors[i]) {
-            if (light_config[i].rainbowMode) {
-                // HSV to RGB for rainbow mode
-                *colors[i] = hsv_to_rgb(light_config[i].hue * 360 / 254, light_config[i].saturation, light_config[i].brightness);
-            } else {
-                // Color temperature mode - show white with intensity
-                uint8_t temp = light_config[i].colorTemp;
-                uint8_t r = map(temp, 0, 100, 150, 100);
-                uint8_t g = map(temp, 0, 100, 80, 130);
-                uint8_t b = map(temp, 0, 100, 10, 150);
-                float factor = light_config[i].brightness / 254.0f;
-                *colors[i] = ((uint32_t)(r * factor) << 16) | ((uint32_t)(g * factor) << 8) | (uint32_t)(b * factor);
-            }
-            light_config[i].changed = false;
-        }
-    }
 }
 
 // ============ MenuSystem Synchronization Functions ============
@@ -896,16 +1054,19 @@ extern "C" void matter_update_intensity(uint8_t channel, uint8_t intensity_0_100
 
     // Matter CurrentLevel is 1-254 (0x01-0xFE). 0 is technically Off or "Not at level"
     // We map 0-100% to 1-254 for the 'On' state.
-    uint8_t level = (uint16_t)intensity_0_100 * 253 / 100 + 1;
+    // On/Off channel: only on/off is reported and sent, so the light keeps its own brightness
+    bool on_off_only = (channel_types[channel] == CHANNEL_TYPE_ON_OFF);
+    if (on_off_only && intensity_0_100 > 0) intensity_0_100 = 100;
+
+    uint8_t level = pct_to_level(intensity_0_100);
     if (intensity_0_100 == 0) level = 0;
-    
+
     bool should_be_on = (intensity_0_100 > 0);
     
     ESP_LOGI(TAG, "Syncing Intensity: CH %d -> %d%% (Matter Level: %d, On: %s)", 
              channel, intensity_0_100, level, should_be_on ? "YES" : "NO");
 
     light_config[channel].brightness = level;
-    light_config[channel].changed = true;
 
     // Order matters: controllers apply each attribute report as it arrives. Reporting On before the new level
     // (or writing level 0 on Off) exposed a transient "on at brightness 0" state, which Home Assistant passed to
@@ -913,6 +1074,11 @@ extern "C" void matter_update_intensity(uint8_t channel, uint8_t intensity_0_100
     if (!should_be_on) {
         // Off only: keep the last level, like a real light (the internal state above still tracks 0 = off)
         schedule_matter_update(light_endpoint_ids[channel], OnOff::Id, OnOff::Attributes::OnOff::Id, esp_matter_bool(false));
+    } else if (on_off_only) {
+        // Restore the light's own brightness first: after an Off from the controller, Matter left the level at
+        // the minimum, and the controller would otherwise switch the light on at 1/255
+        schedule_matter_update(light_endpoint_ids[channel], LevelControl::Id, LevelControl::Attributes::CurrentLevel::Id, esp_matter_nullable_uint8(on_off_level[channel]));
+        schedule_matter_update(light_endpoint_ids[channel], OnOff::Id, OnOff::Attributes::OnOff::Id, esp_matter_bool(true));
     } else {
         // Level first, then On, so the light never appears "on" with a stale level
         schedule_matter_update(light_endpoint_ids[channel], LevelControl::Id, LevelControl::Attributes::CurrentLevel::Id, esp_matter_nullable_uint8(level));
@@ -923,10 +1089,13 @@ extern "C" void matter_update_intensity(uint8_t channel, uint8_t intensity_0_100
     esp_matter::client::request_handle_t req;
     req.type = esp_matter::client::INVOKE_CMD;
 
-    if (should_be_on) {
+    if (should_be_on && !on_off_only) {
         req.command_path.mClusterId = LevelControl::Id;
         req.command_path.mCommandId = LevelControl::Commands::MoveToLevelWithOnOff::Id;
         req.request_data = (void*)(uintptr_t)level;
+    } else if (should_be_on) {
+        req.command_path.mClusterId = OnOff::Id;
+        req.command_path.mCommandId = OnOff::Commands::On::Id;
     } else {
         req.command_path.mClusterId = OnOff::Id;
         req.command_path.mCommandId = OnOff::Commands::Off::Id;
@@ -957,14 +1126,12 @@ static void matter_color_temp_task(intptr_t arg) {
 
 extern "C" void matter_update_color_temp(uint8_t channel, uint8_t temp_0_100) {
     if (channel >= 3 || light_endpoint_ids[channel] == 0) return;
+    if (channel_types[channel] != CHANNEL_TYPE_WHITE && channel_types[channel] != CHANNEL_TYPE_COLOR) return;
 
     light_config[channel].colorTemp = temp_0_100;
     light_config[channel].rainbowMode = false;
-    light_config[channel].changed = true;
 
-    uint16_t mireds = 153 + ((uint32_t)temp_0_100 * (500 - 153) / 100);
-    if (mireds < 153) mireds = 153;
-    if (mireds > 500) mireds = 500;
+    uint16_t mireds = pct_to_mireds(temp_0_100 > 100 ? 100 : temp_0_100);
 
     ESP_LOGI(TAG, "Syncing ColorTemp: CH %d -> %d%% (%d Mireds)", channel, temp_0_100, mireds);
 
@@ -1006,9 +1173,9 @@ static void matter_rainbow_task(intptr_t arg) {
 }
 extern "C" void matter_update_rainbow_hue(uint8_t channel, uint8_t hue_0_255) {
     if (channel >= 3 || light_endpoint_ids[channel] == 0) return;
+    if (channel_types[channel] != CHANNEL_TYPE_COLOR) return;
 
     light_config[channel].rainbowMode = true;
-    light_config[channel].changed = true;
 
     uint8_t matterHue = ((uint16_t)hue_0_255 * 254) / 255;
     light_config[channel].hue = matterHue;
@@ -1041,8 +1208,6 @@ extern "C" void matter_set_battery_percent(uint8_t percent) {
     chip::DeviceLayer::PlatformMgr().ScheduleWork(matter_update_battery_task, (intptr_t)percent);
 }
 
-extern "C" uint32_t matter_get_sleep_timeout_ms(void) { return (uint32_t)sleep_timeout_val * 100; }
-
 extern "C" int matter_get_personality_int(void) { return (int)current_personality; }
 
 extern "C" esp_err_t matter_shutdown_wifi_radio(void)
@@ -1052,19 +1217,4 @@ extern "C" esp_err_t matter_shutdown_wifi_radio(void)
     esp_wifi_set_mode(WIFI_MODE_NULL);
     esp_wifi_stop();
     return esp_wifi_deinit();
-}
-
-extern "C" void matter_toggle_personality_nvs(void) {
-    matter_personality_t p = get_personality();
-    if (p == PERSONALITY_WIFI) set_personality(PERSONALITY_THREAD);
-    else set_personality(PERSONALITY_WIFI);
-}
-
-extern "C" void matter_reboot(void) {
-    esp_restart();
-}
-
-extern "C" void matter_toggle_personality(void) {
-    matter_toggle_personality_nvs();
-    matter_reboot();
 }

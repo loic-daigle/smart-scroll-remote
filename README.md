@@ -12,12 +12,13 @@ This repository contains everything needed to build one: the [firmware](firmware
 
 - **3 channels**, each exposed to Matter as an Extended Color Light (on/off, brightness, colour temperature, hue/saturation).
 - **Bidirectional:** turning the dial updates the light, and changes from Home Assistant, an app or voice update the remote.
+- **Per-channel type, set from Home Assistant:** On/Off, Dimmable, Dimmable + white or Dimmable + colour. The remote only shows the pages that type needs.
 - **Multi-click events:** double, triple, 4 and 5 clicks per channel are reported as Matter Generic Switch events, so you can trigger any automation. An LED pattern on the remote confirms each one.
 - **Dual stack:** Thread and Wi-Fi in one firmware. The commissioner decides, and the choice is remembered.
-- **Low power:** automatic light sleep 5 s after the last interaction, with the network kept alive. Deep sleep after 1 h idle.
+- **Low power:** automatic light sleep 5 s after the last interaction, with the network kept alive. Deep sleep after 1 h idle by default, adjustable from Home Assistant ("Deep sleep after": 10 min to 12 h, or never).
 - **Battery reporting** through the Matter Power Source cluster.
 - **Matter bindings:** each channel can also send On/Off, Level and Color commands directly to bound lights.
-- **Home Assistant blueprint** that keeps each channel in sync with any light or light group (e.g. Tuya) and adds click actions.
+- **Home Assistant blueprint** that keeps each channel in sync with any light or light group (e.g. Tuya), or with an on/off device (switch, plug, fan), and adds click actions.
 
 ## Hardware
 
@@ -58,6 +59,19 @@ The pins are defined at the top of [`firmware/main/main.c`](firmware/main/main.c
 | Double / triple / 4 / 5 clicks | — | Send a multi-press event for this channel (see below) |
 
 Multi-click confirmation blinks: 2 clicks = the 2 side LEDs, 3 = all three, 4 = all then the middle one, 5 = all then the sides.
+
+### Channel type
+
+Each channel has a **Channel N type** select (on the remote's device page in Home Assistant, under Configuration). It takes effect immediately, with no restart:
+
+| Type | Inside the channel |
+|---|---|
+| On/Off | Click toggles. Turning the dial up switches on, down switches off. Only on/off is sent, so the light keeps its own brightness. |
+| Dimmable | Brightness only (click does nothing) |
+| Dimmable + white | Click cycles brightness ↔ colour temperature |
+| Dimmable + colour | Click cycles brightness → colour temperature → colour (default) |
+
+Only the remote's behaviour changes: the channel stays an Extended Color Light in Matter, so Home Assistant never needs to re-read the device when you switch types.
 
 When the remote is asleep:
 - **Turning the dial** wakes it straight into the current channel's brightness setting.
@@ -124,18 +138,21 @@ matter esp factory_reset        # forget all fabrics and reopen commissioning
 | 1 | Generic Switch | Power Source (battery %) |
 | 2, 3, 4 | Extended Color Light | Channels 1, 2, 3 (+ Binding and client clusters for direct control) |
 | 5, 6, 7 | Generic Switch | Multi-press events for channels 1, 2, 3 (`multi_press_2` … `multi_press_5`) |
+| 8, 9, 10 | Mode Select | Channel 1, 2, 3 type. On their own endpoints: Home Assistant's Matter server ignores a Mode Select cluster placed on a light endpoint. |
+| 11 | Mode Select | Deep sleep after (10 min, 30 min, 1 h, 4 h, 12 h, never). Applies from the next time the remote goes idle. |
 
 ## Home Assistant
 
 [![Open your Home Assistant instance and show the blueprint import dialog.](https://my.home-assistant.io/badges/blueprint_import.svg)](https://my.home-assistant.io/redirect/blueprint_import/?blueprint_url=https%3A%2F%2Fgithub.com%2Floic-daigle%2Fsmart-scroll-remote%2Fblob%2Fmain%2Fhome_assistant%2Fsmart_remote_light_sync.yaml)
 
-[`home_assistant/smart_remote_light_sync.yaml`](home_assistant/smart_remote_light_sync.yaml) keeps one remote channel and one real light or group in sync. Create **one automation per channel**.
+[`home_assistant/smart_remote_light_sync.yaml`](home_assistant/smart_remote_light_sync.yaml) keeps one remote channel and one real light, group or on/off device (switch, plug, fan, input boolean) in sync. Create **one automation per channel**.
 
 - **Remote → light:** sent immediately, no debounce. The light always ends on the latest value.
 - **Light → remote:** follows changes made elsewhere, with a short priority window for the remote so cloud lights' delayed echoes don't fight the dial.
 - **No ping-pong:** nothing is sent when the other side already matches. Small tolerances absorb rounding differences.
 - **No surprise changes on reconnect:** when the remote comes back online, it is updated *from* the light.
 - **Colour temperature clamping** to what the receiving light supports.
+- **Matter binding mode:** if a channel is bound directly to a Matter light, set **Sync direction** to "Light → remote only". The remote then controls the light itself, and the blueprint only keeps the remote's state up to date.
 - **Optional multi-click actions:** pick the channel's event entity, then any action for 2, 3, 4 or 5 clicks.
 
 Requires Home Assistant 2024.10 or newer. After adding the per-channel click switches to an already-paired remote, use **Re-interview** on the device page so Home Assistant creates the event entities.

@@ -1,8 +1,8 @@
 blueprint:
   name: Smart Scroll Remote ⇄ Light Sync
   description: >
-    Keeps one channel of the Smart Scroll Remote (a Matter light entity) and a real light or group in sync,
-    in both directions, with as little delay as possible.
+    Keeps one channel of the Smart Scroll Remote (a Matter light entity) and a real light, group or on/off
+    device (switch, plug, fan, input boolean) in sync, in both directions, with as little delay as possible.
 
     - Remote → light: sent immediately, no debounce. While the dial turns, intermediate values are skipped
       automatically and the light always ends on the latest value.
@@ -26,11 +26,33 @@ blueprint:
         entity:
           domain: light
     target_light:
-      name: Light or group
-      description: The real light (or light group) this channel controls.
+      name: Light, group or on/off device
+      description: >
+        The real light (or light group) this channel controls. Switches, smart plugs, fans and input booleans
+        also work: only on/off is synced for them (set the remote's "Channel N type" to On/Off).
       selector:
         entity:
-          domain: light
+          domain:
+            - light
+            - switch
+            - fan
+            - input_boolean
+    sync_direction:
+      name: Sync direction
+      description: >
+        Both ways: the remote controls the light through Home Assistant, and the light updates the remote.
+        Light → remote only: use this when the channel is bound to a Matter light with a Matter binding. The
+        remote then controls the light directly, and Home Assistant only keeps the remote's state up to date
+        (sending the commands as well would double them). For bound lights, also turn off "Scale colour
+        temperature", since the binding sends exact values.
+      default: both
+      selector:
+        select:
+          options:
+            - label: Both ways
+              value: both
+            - label: Light → remote only (Matter binding)
+              value: to_remote
     remote_priority_seconds:
       name: Remote priority window
       description: >
@@ -125,10 +147,21 @@ mode: queued
 max: 4
 max_exceeded: silent
 
+trigger_variables:
+  settle_s: !input remote_priority_seconds
+
 triggers:
   - trigger: state
     entity_id: !input remote_light
     id: remote
+  # Settle: once the remote has been left alone for the priority window (+1 s), check the real light once and
+  # correct the remote if it differs (changes made during the window were ignored, and some bulbs don't apply
+  # every command). Event-driven: one check after use, no polling.
+  - trigger: state
+    entity_id: !input remote_light
+    for:
+      seconds: "{{ settle_s | int(6) + 1 }}"
+    id: settle
   - trigger: state
     entity_id: !input target_light
     id: target
@@ -150,6 +183,7 @@ variables:
   reverse_ct: !input reverse_color_temp
   transition_s: !input transition_seconds
   resend_on: !input resend_after_power_on
+  sync_dir: !input sync_direction
 
 conditions:
   # Only real on/off ⇄ on/off changes of light values. Skips unavailable/unknown transitions, which would
@@ -159,7 +193,7 @@ conditions:
       {% set f = trigger.from_state %}
       {% set t = trigger.to_state %}
       {% set dead = ['unavailable', 'unknown'] %}
-      {{ (trigger.id == 'click' and f is not none and t is not none
+      {{ (trigger.id in ['click', 'settle'] and f is not none and t is not none
           and f.state not in dead and t.state not in dead) or
          trigger.id == 'remote_back' or
          f is not none and t is not none
@@ -190,17 +224,25 @@ actions:
       from_remote: "{{ trigger.id == 'remote' }}"
       src: "{{ remote_entity if from_remote else target_entity }}"
       dst: "{{ target_entity if from_remote else remote_entity }}"
+      # The target can be an on/off device (switch, fan, input_boolean): only on/off is synced with it.
+      dst_is_light: "{{ dst.startswith('light.') }}"
+
+  # Matter binding: the remote already commanded the light directly, only light → remote is synced here.
+  - condition: template
+    value_template: "{{ not (from_remote and sync_dir == 'to_remote') }}"
 
   # The remote has priority: ignore light → remote while the remote was touched recently.
   - condition: template
     value_template: >
-      {{ from_remote or trigger.id == 'remote_back' or
+      {{ from_remote or trigger.id in ['remote_back', 'settle'] or
          (now() - states[remote_entity].last_updated).total_seconds() > priority_s | float(6) }}
 
   # Read the live source state (see mode comment above) and the destination state.
   - variables:
       src_state: "{{ states(src) }}"
       src_bri: "{{ state_attr(src, 'brightness') | int(0) }}"
+      # False for on/off devices and on/off-only lights: brightness is then neither sent nor compared
+      src_has_bri: "{{ state_attr(src, 'brightness') is not none }}"
       src_mode: "{{ state_attr(src, 'color_mode') }}"
       src_k: "{{ state_attr(src, 'color_temp_kelvin') }}"
       src_hs: "{{ state_attr(src, 'hs_color') | list if state_attr(src, 'hs_color') else none }}"
@@ -208,6 +250,7 @@ actions:
       dst_bri: "{{ state_attr(dst, 'brightness') | int(0) }}"
       dst_k: "{{ state_attr(dst, 'color_temp_kelvin') }}"
       dst_hs: "{{ state_attr(dst, 'hs_color') | list if state_attr(dst, 'hs_color') else none }}"
+      dst_mode: "{{ state_attr(dst, 'color_mode') }}"
       want_ct: "{{ src_mode in ['color_temp', 'white'] and src_k is not none }}"
       want_hs: "{{ src_mode in ['hs', 'rgb', 'xy', 'rgbw', 'rgbww'] and src_hs is not none }}"
       # Colour temperature for the destination. Scaling is done in mireds (1e6 / K), which is linear for the
@@ -240,11 +283,17 @@ actions:
       transition: "{{ (transition_s | float(0)) if from_remote else 0 }}"
       # One payload for every "turn on", so the optional re-send is guaranteed to be identical.
       on_data: >
-        {% set d = {'brightness': brightness, 'transition': transition} %}
-        {% if want_ct %}
-          {% set d = dict(d, color_temp_kelvin=kelvin | int) %}
-        {% elif want_hs %}
-          {% set d = dict(d, hs_color=[src_hs[0] | float, src_hs[1] | float]) %}
+        {% set d = {} %}
+        {% if dst_is_light %}
+          {% set d = {'transition': transition} %}
+          {% if src_has_bri %}
+            {% set d = dict(d, brightness=brightness) %}
+          {% endif %}
+          {% if want_ct %}
+            {% set d = dict(d, color_temp_kelvin=kelvin | int) %}
+          {% elif want_hs %}
+            {% set d = dict(d, hs_color=[src_hs[0] | float, src_hs[1] | float]) %}
+          {% endif %}
         {% endif %}
         {{ d }}
 
@@ -261,12 +310,20 @@ actions:
         {{ dst_state != 'off' }}
       {% elif dst_state != 'on' %}
         true
+      {% elif not dst_is_light %}
+        false
       {% else %}
-        {% set bri_diff = (brightness - dst_bri) | abs > 3 %}
+        {% set bri_diff = src_has_bri and (brightness - dst_bri) | abs > 3 %}
+        {# Home Assistant reports hs_color even in white mode, so a different colour mode must count as a
+           difference on its own, otherwise "white vs colour" can look like a match #}
+        {% set dst_is_ct = dst_mode in ['color_temp', 'white'] %}
+        {% set dst_is_hs = dst_mode in ['hs', 'rgb', 'xy', 'rgbw', 'rgbww'] %}
         {% if want_ct %}
           {# compare in mireds: one dial step is ~10-17 mireds, rounding echoes are 1-2 #}
-          {% set col_diff = dst_k is none or dst_k | int(0) <= 0 or
+          {% set col_diff = not dst_is_ct or dst_k is none or dst_k | int(0) <= 0 or
                             (1000000 / (kelvin | int) - 1000000 / (dst_k | int)) | abs > 3 %}
+        {% elif want_hs and not dst_is_hs %}
+          {% set col_diff = true %}
         {% elif want_hs %}
           {% if dst_hs is none %}
             {% set col_diff = true %}
@@ -275,7 +332,7 @@ actions:
             {% set dh = [dh, 360 - dh] | min %}
             {% set col_diff = dh > 2 or (src_hs[1] | float - dst_hs[1] | float) | abs > 3 %}
           {% endif %}
-        {% else %}
+        {% else %}  
           {% set col_diff = false %}
         {% endif %}
         {{ bri_diff or col_diff }}
@@ -284,7 +341,13 @@ actions:
   - choose:
       - conditions: "{{ src_state == 'off' }}"
         sequence:
-          - action: light.turn_off
+          - action: "{{ 'light.turn_off' if dst_is_light else 'homeassistant.turn_off' }}"
+            target:
+              entity_id: "{{ dst }}"
+      # On/off device: plain turn on (no brightness or colour)
+      - conditions: "{{ not dst_is_light }}"
+        sequence:
+          - action: homeassistant.turn_on
             target:
               entity_id: "{{ dst }}"
 

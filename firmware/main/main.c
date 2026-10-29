@@ -1,4 +1,4 @@
-#include <stdint.h>
+                #include <stdint.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -50,7 +50,6 @@
 #define MULTI_CLICK_TIMEOUT_MS  200
 #define BATTERY_READ_INTERVAL_MS 60000
 #define LIGHT_SLEEP_IDLE_MS     5000
-#define DEEP_SLEEP_IDLE_MS      3600000
 #define SYNC_MIN_GAP_MS         300   // Min spacing between Matter publishes; dial turns in between coalesce into one
 
 // ------------------ Battery ADC Configuration ------------------
@@ -559,13 +558,15 @@ static void enter_smart_sleep(void) {
     arm_input_wakeup();
     esp_pm_lock_release(ui_awake_lock);
 
-    uint32_t woke = ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(DEEP_SLEEP_IDLE_MS));
+    // Deep sleep delay comes from the controller's "Deep sleep after" select (0 = never)
+    uint32_t deep_sleep_ms = matter_get_deep_sleep_ms();
+    uint32_t woke = ulTaskNotifyTake(pdTRUE, deep_sleep_ms ? pdMS_TO_TICKS(deep_sleep_ms) : portMAX_DELAY);
 
     esp_pm_lock_acquire(ui_awake_lock);
     disarm_input_wakeup();
 
     if (!woke) {
-        ESP_LOGI(TAG, "1h inactivity reached: escalating to deep sleep");
+        ESP_LOGI(TAG, "%" PRIu32 " min inactivity reached: escalating to deep sleep", deep_sleep_ms / 60000);
         esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_GPIO);
         configure_ext1_wakeup_for_inputs();
         esp_deep_sleep_start();
@@ -725,6 +726,11 @@ static void button_task(void *pvParameters)
         }
 
         menu_system_handle_encoder(&menu, currentEncoder);
+        if (menu.currentChannel != pre_channel) {
+            // Persist the selection so any reboot (not only deep sleep) comes back on the same channel
+            nvsWritePending = true;
+            lastNvsWriteTime = now;
+        }
 
         if (suppress_next_single_click && now > suppress_single_click_until_ms) {
             suppress_next_single_click = false;
@@ -1110,9 +1116,13 @@ void app_main(void)
         wakeup_status = esp_sleep_get_gpio_wakeup_status();
     }
 
-    if (wakeup_reason == ESP_SLEEP_WAKEUP_EXT1 || wakeup_reason == ESP_SLEEP_WAKEUP_GPIO) {
-        // Check if dial triggered wakeup (Pin A or B)
-        if (wakeup_status & ((1ULL << PIN_ENC_A) | (1ULL << PIN_ENC_B))) {
+    // Any boot after deep sleep is a wake-up, even if the wake cause/status comes back unclear: otherwise the
+    // remote booted like a power-on (main screen, channel 1) and the first dial step down wrapped to channel 3.
+    bool woke_from_deep_sleep = (esp_reset_reason() == ESP_RST_DEEPSLEEP) ||
+                                wakeup_reason == ESP_SLEEP_WAKEUP_EXT1 || wakeup_reason == ESP_SLEEP_WAKEUP_GPIO;
+    if (woke_from_deep_sleep) {
+        // Dial (pin A or B), or an unclear status: open the channel without toggling it
+        if ((wakeup_status & ((1ULL << PIN_ENC_A) | (1ULL << PIN_ENC_B))) || !(wakeup_status & (1ULL << PIN_BUTTON))) {
             menu.currentState = IN_CHANNEL_INTENSITY; // Dial wakeup -> Direct to Dimming
             menu.currentChannel = rtc_currentChannel;
             ESP_LOGI(TAG, "Wakeup from DIAL: jumping to channel %d intensity", menu.currentChannel);
@@ -1123,6 +1133,7 @@ void app_main(void)
             ESP_LOGI(TAG, "Wakeup from BUTTON: toggle channel %d and open intensity", menu.currentChannel);
         }
     } else {
+        // Channel is restored from NVS in menu_system_init(); 0 is only the first-boot default
         menu.currentState = MENU_SELECT_CHANNEL;
         menu.currentChannel = 0;
         ESP_LOGI(TAG, "Normal boot: starting on channel select");

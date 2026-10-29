@@ -96,6 +96,28 @@ static bool matter_cb_is_locked_out(uint8_t channel) {
     return is_locked_out(channel);
 }
 
+// Channel type changed from the controller: leave pages the new type doesn't have, and drop colour mode
+// on types without colour. Nothing is published: the light itself is not changed.
+static void matter_cb_channel_type_changed(uint8_t channel) {
+    if (!g_actual_menu || channel >= 3 || !menu_lock(200)) return;
+    channel_type_t type = matter_get_channel_type(channel);
+    if (type != CHANNEL_TYPE_COLOR) {
+        g_actual_menu->isRainbowMode[channel] = false;
+    }
+    if (g_actual_menu->currentChannel == channel) {
+        menu_state_t s = g_actual_menu->currentState;
+        bool allowed = (s == MENU_SELECT_CHANNEL || s == IN_CHANNEL_INTENSITY ||
+                        (s == IN_CHANNEL_COLOR_TEMP && type >= CHANNEL_TYPE_WHITE) ||
+                        (s == IN_CHANNEL_RAINBOW && type == CHANNEL_TYPE_COLOR));
+        if (!allowed) g_actual_menu->currentState = IN_CHANNEL_INTENSITY;
+    }
+    menu_request_nvs_save();
+    if (should_refresh_display(channel)) {
+        menu_system_update_display(g_actual_menu);
+    }
+    menu_unlock();
+}
+
 extern "C" void matter_init_menu_system(void) {
     static const MenuSystemInterface iface = {
         .updateIntensity = matter_cb_update_intensity,
@@ -104,6 +126,7 @@ extern "C" void matter_init_menu_system(void) {
         .updateRainbowMode = matter_cb_update_rainbow_mode,
         .updateDisplay = matter_cb_update_display,
         .isLockedOut = matter_cb_is_locked_out,
+        .channelTypeChanged = matter_cb_channel_type_changed,
     };
     matter_set_menu_system_interface(&iface);
 }
