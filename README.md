@@ -6,6 +6,8 @@ The same firmware runs on **Thread _or_ Wi-Fi**, selectable at runtime. On Threa
 
 This repository contains everything needed to build one: the [firmware](firmware/), the [PCB](hardware/pcb/), the [enclosure](hardware/enclosure/) and a [Home Assistant blueprint](home_assistant/).
 
+**PCB on OSHWLab:** [oshwlab.com/loicdaigle31/smart-scroll-wheel](https://oshwlab.com/loicdaigle31/smart-scroll-wheel). Open the design in EasyEDA, clone it, or order the board directly.
+
 ---
 
 ## Features
@@ -22,7 +24,7 @@ This repository contains everything needed to build one: the [firmware](firmware
 
 ## Hardware
 
-- **PCB:** design files, fabrication outputs and BOM in [`hardware/pcb/`](hardware/pcb/)
+- **PCB:** design files, fabrication outputs and BOM in [`hardware/pcb/`](hardware/pcb/), also published on [OSHWLab](https://oshwlab.com/loicdaigle31/smart-scroll-wheel)
 - **Enclosure:** CAD sources and print-ready files in [`hardware/enclosure/`](hardware/enclosure/)
 
 | Part | Notes |
