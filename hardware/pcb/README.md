@@ -1,7 +1,8 @@
 # PCB
 
 Electronics design files for the Smart Scroll Remote, designed in **EasyEDA**. The design is also published
-on OSHWLab, where it can be opened and cloned directly in EasyEDA.
+on [OSHWLab](https://oshwlab.com/loicdaigle31/smart-scroll-wheel), where it can be opened and cloned directly
+in EasyEDA.
 
 | Path | What |
 |---|---|
