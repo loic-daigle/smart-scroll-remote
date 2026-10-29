@@ -2,14 +2,14 @@
 
 3D-printable case for the Smart Scroll Remote.
 
-Suggested contents:
-
 | Path | What |
 |---|---|
-| `*.step` | Editable CAD export (works in most CAD tools) |
-| `*.f3d` / native CAD file | Original source, if you want to share it |
-| `print/*.stl` or `*.3mf` | Print-ready parts |
-| `photos/` | Assembly / finished photos |
+| [`cad/smart-scroll-remote-assembly.step`](cad/smart-scroll-remote-assembly.step) | Full assembly from Fusion 360: case parts and the populated PCB (opens in most CAD tools) |
+| [`print/enclosure.stl`](print/enclosure.stl) | Main body |
+| [`print/wheel.stl`](print/wheel.stl) | Scroll wheel |
+| [`print/light-diffuser.stl`](print/light-diffuser.stl) | Diffuser for the three LEDs |
+| [`print/bottom-cover.stl`](print/bottom-cover.stl) | Bottom cover |
+| [`print/bottom-cover-magnet.stl`](print/bottom-cover-magnet.stl) | Bottom cover with magnet pocket, as an alternative to the plain cover (e.g. to stick the remote to a metal surface) |
 
 Print notes (material, layer height, supports, inserts/screws) go here.
 

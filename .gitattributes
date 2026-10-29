@@ -3,3 +3,13 @@
 *.bin binary
 *.png binary
 *.jpg binary
+# Hardware files: stored byte-for-byte (STEP/STL/CSV exports must not have their line endings rewritten)
+*.step binary
+*.stp binary
+*.stl binary
+*.3mf binary
+*.epro binary
+*.epro2 binary
+*.zip binary
+*.pdf binary
+hardware/pcb/fabrication/*.csv binary

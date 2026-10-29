@@ -1,15 +1,16 @@
 # PCB
 
-Electronics design files for the Smart Scroll Remote.
-
-Suggested contents:
+Electronics design files for the Smart Scroll Remote, designed in **EasyEDA**. The design is also published
+on OSHWLab, where it can be opened and cloned directly in EasyEDA.
 
 | Path | What |
 |---|---|
-| `*.kicad_pro`, `*.kicad_sch`, `*.kicad_pcb` | Source design (or the equivalent for your EDA tool) |
-| `fabrication/` | Gerbers, drill files, pick-and-place, ready to order |
-| `bom.csv` | Bill of materials |
-| `schematic.pdf` | Exported schematic for quick viewing on GitHub |
+| [`easyeda/smart-scroll-remote.epro2`](easyeda/smart-scroll-remote.epro2) | EasyEDA Pro project: schematic and PCB in one file (File → Import in EasyEDA Pro) |
+| [`fabrication/smart-scroll-remote-gerber.zip`](fabrication/smart-scroll-remote-gerber.zip) | Gerbers, ready to upload to a PCB manufacturer as is |
+| [`fabrication/smart-scroll-remote-bom.csv`](fabrication/smart-scroll-remote-bom.csv) | Bill of materials |
+| [`fabrication/smart-scroll-remote-cpl.csv`](fabrication/smart-scroll-remote-cpl.csv) | Pick-and-place (CPL) for assembly |
+| [`schematic.pdf`](schematic.pdf) | Schematic, for quick viewing on GitHub |
+| [`../enclosure/cad/smart-scroll-remote-assembly.step`](../enclosure/cad/smart-scroll-remote-assembly.step) | 3D model: the populated board is included in the enclosure assembly |
 
 The firmware expects the pinout listed in the [main README](../../README.md#pinout).
 
