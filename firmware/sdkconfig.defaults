@@ -130,8 +130,8 @@ CONFIG_THREAD_NETWORK_ENDPOINT_ID=0
 # CONFIG_WIFI_NETWORK_ENDPOINT_ID is not set
 
 
-# Dynamic endpoint configuration
-CONFIG_ESP_MATTER_MAX_DYNAMIC_ENDPOINT_COUNT=16
+# Dynamic endpoint configuration (17 used: switch, 3 lights, 3 click, 4 selects, 6 dial up/down)
+CONFIG_ESP_MATTER_MAX_DYNAMIC_ENDPOINT_COUNT=20
 
 # LwIP config for OpenThread and Wi-Fi
 CONFIG_LWIP_IPV6_NUM_ADDRESSES=8

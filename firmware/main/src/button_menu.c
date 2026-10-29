@@ -102,6 +102,7 @@ void menu_system_init(menu_system_t *menu) {
         menu->colorTemp[i] = 50;
         menu->rainbowHue[i] = 0;
         menu->isRainbowMode[i] = false;
+        menu->dialPending[i] = 0;
     }
 
     menu_system_load_from_nvs(menu);
@@ -221,6 +222,8 @@ uint32_t menu_system_get_channel_color(menu_system_t *menu, uint8_t ch, bool for
     // PREVIEW LOGIC: If we are actively in a sub-menu for this channel, 
     // prioritize showing the relevant preview (White for CCT, Rainbow for RGB).
     channel_type_t type = matter_get_channel_type(ch);
+    // Dial events channel: no light state to show, a fixed soft blue marks the mode
+    if (type == CHANNEL_TYPE_EVENTS) return (0 << 16) | (40 << 8) | 120;
     bool showRainbow = menu->isRainbowMode[ch];
     if (menu->currentChannel == ch) {
         if (menu->currentState == IN_CHANNEL_RAINBOW) showRainbow = true;
@@ -291,6 +294,11 @@ void menu_system_handle_encoder(menu_system_t *menu, int currentVal) {
                 break;
 
             case IN_CHANNEL_INTENSITY: {
+                if (matter_get_channel_type(menu->currentChannel) == CHANNEL_TYPE_EVENTS) {
+                    // No light here: count the notch, the sync task reports it as a dial event
+                    menu->dialPending[menu->currentChannel] += dir;
+                    break;
+                }
                 if (matter_get_channel_type(menu->currentChannel) == CHANNEL_TYPE_ON_OFF) {
                     // On/Off channel: turning up switches on, turning down switches off
                     menu->intensity[menu->currentChannel] = (dir > 0) ? 100 : 0;
@@ -361,8 +369,9 @@ void menu_system_handle_button(menu_system_t *menu, int event) {
             menu_system_notify_interaction(menu->currentChannel);
             return;
         }
-        if (menu->currentState != MENU_SELECT_CHANNEL && type == CHANNEL_TYPE_DIMMABLE) {
-            return;  // intensity is the only page
+        if (menu->currentState != MENU_SELECT_CHANNEL &&
+            (type == CHANNEL_TYPE_DIMMABLE || type == CHANNEL_TYPE_EVENTS)) {
+            return;  // single page (Dial events: the menu task reports the click instead)
         }
 
         flash_transition();

@@ -70,6 +70,7 @@ Each channel has a **Channel N type** select (on the remote's device page in Hom
 | Dimmable | Brightness only (click does nothing) |
 | Dimmable + white | Click cycles brightness ↔ colour temperature |
 | Dimmable + colour | Click cycles brightness → colour temperature → colour (default) |
+| Dial events (no light) | The dial and clicks are reported as events (LEDs soft blue), for media, blinds, scenes... See [Dial actions](#dial-actions-bilresa-style). |
 
 Only the remote's behaviour changes: the channel stays an Extended Color Light in Matter, so Home Assistant never needs to re-read the device when you switch types.
 
@@ -121,6 +122,18 @@ When unpaired, the remote opens a commissioning window over BLE at boot and stay
 
 > These are public test credentials and test attestation certificates, which is fine for a personal device. A product would need its own VID/PID, certificates and a factory partition.
 
+### Pairing with Home Assistant
+
+1. **Allow test devices in the Matter Server.** Settings → Add-ons (Apps) → **Matter Server** → Configuration → turn on **Enable test-net DCL** (if hidden, show the unused optional options), save, and restart the Matter Server. The current Matter Server (matter.js) rejects test attestation certificates by default: pairing then gets through Bluetooth and Thread, and fails at the very end with "error code 1 / unable to add the device", right after Home Assistant reads the remote's certificate.
+2. **Give the phone your Thread credentials.** Home Assistant app → Settings → Devices & services → Thread → ⋮ → **Send credentials to phone**.
+3. **Pair from the phone**, close to the remote, with the code above. On Android, the system **"Matter device found" popup** (then choose Home Assistant) has been more reliable than starting from Home Assistant's own "Add device" button. Android first adds the device to Google's Matter fabric, then shares it with Home Assistant.
+
+**Starting over:** if the remote is still paired somewhere (for example in Google Home), it does not open pairing mode on its own. Either share it from that app (*Linked Matter apps & services*), or factory-reset it by erasing its `nvs` partition, which also clears the channel types and other settings:
+
+```
+esptool --chip esp32c6 -p <PORT> erase-region 0x9000 0x10000
+```
+
 ### Serial console commands
 
 Over the UART console (the module's TX/RX pins; the USB port is output-only):
@@ -140,6 +153,7 @@ matter esp factory_reset        # forget all fabrics and reopen commissioning
 | 5, 6, 7 | Generic Switch | Multi-press events for channels 1, 2, 3 (`multi_press_2` … `multi_press_5`) |
 | 8, 9, 10 | Mode Select | Channel 1, 2, 3 type. On their own endpoints: Home Assistant's Matter server ignores a Mode Select cluster placed on a light endpoint. |
 | 11 | Mode Select | Deep sleep after (10 min, 30 min, 1 h, 4 h, 12 h, never). Applies from the next time the remote goes idle. |
+| 12 – 17 | Generic Switch | Dial up / dial down for channels 1, 2, 3 (in that order), used by "Dial events" channels. `multi_press_N` = N notches. |
 
 ## Home Assistant
 
@@ -154,6 +168,12 @@ matter esp factory_reset        # forget all fabrics and reopen commissioning
 - **Colour temperature clamping** to what the receiving light supports.
 - **Matter binding mode:** if a channel is bound directly to a Matter light, set **Sync direction** to "Light → remote only". The remote then controls the light itself, and the blueprint only keeps the remote's state up to date.
 - **Optional multi-click actions:** pick the channel's event entity, then any action for 2, 3, 4 or 5 clicks.
+
+### Dial actions (BILRESA-style)
+
+[![Open your Home Assistant instance and show the blueprint import dialog.](https://my.home-assistant.io/badges/blueprint_import.svg)](https://my.home-assistant.io/redirect/blueprint_import/?blueprint_url=https%3A%2F%2Fgithub.com%2Floic-daigle%2Fsmart-scroll-remote%2Fblob%2Fmain%2Fhome_assistant%2Fsmart_remote_dial_actions.yaml)
+
+Set a channel's type to **Dial events (no light)** and the dial no longer mirrors a light. Each turn is reported on that channel's *dial up* / *dial down* event entity as `multi_press_N` (N = notches since the last event, up to 10), and single clicks are reported too. [`home_assistant/smart_remote_dial_actions.yaml`](home_assistant/smart_remote_dial_actions.yaml) runs your own actions for up, down and 1–5 clicks, with `notches` and `steps` (signed) available in templates, e.g. `brightness_step_pct: "{{ steps * 5 }}"` or a media player's volume.
 
 Requires Home Assistant 2024.10 or newer. After adding the per-channel click switches to an already-paired remote, use **Re-interview** on the device page so Home Assistant creates the event entities.
 

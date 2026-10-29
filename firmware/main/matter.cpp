@@ -272,6 +272,8 @@ static uint16_t switch_endpoint_id = 0;
 static uint16_t light_endpoint_ids[3] = {0};
 static uint16_t channel_switch_endpoint_ids[3] = {0};
 static uint16_t channel_type_endpoint_ids[3] = {0};
+static uint16_t dial_up_endpoint_ids[3] = {0};
+static uint16_t dial_down_endpoint_ids[3] = {0};
 static uint16_t deep_sleep_endpoint_id = 0;
 
 // Default stub if not provided
@@ -377,7 +379,8 @@ class SettingsModesManager : public ModeSelect::SupportedModesManager
 public:
     SettingsModesManager()
     {
-        static const char *labels[CHANNEL_TYPE_COUNT] = {"On/Off", "Dimmable", "Dimmable + white", "Dimmable + colour"};
+        static const char *labels[CHANNEL_TYPE_COUNT] = {"On/Off", "Dimmable", "Dimmable + white", "Dimmable + colour",
+                                                         "Dial events (no light)"};
         for (uint8_t m = 0; m < CHANNEL_TYPE_COUNT; m++) {
             mChannelType[m].label = chip::CharSpan::fromCharString(labels[m]);
             mChannelType[m].mode = m;
@@ -492,6 +495,7 @@ static bool apply_light_attribute(int i, uint32_t cluster_id, uint32_t attribute
     bool locked_out = (menusys.isLockedOut && menusys.isLockedOut(i));
     // Values the channel type doesn't use are ignored (the endpoint still accepts them)
     channel_type_t type = (channel_type_t)channel_types[i];
+    if (type == CHANNEL_TYPE_EVENTS) return false;  // no light on this channel: nothing to show
     bool has_level = (type != CHANNEL_TYPE_ON_OFF);
     bool has_ct = (type == CHANNEL_TYPE_WHITE || type == CHANNEL_TYPE_COLOR);
     bool has_hue = (type == CHANNEL_TYPE_COLOR);
@@ -796,6 +800,25 @@ static endpoint_t *create_channel_type_endpoint(node_t *node, uint8_t channel_id
     return endpoint::mode_select::create(node, &cfg, ENDPOINT_FLAG_NONE, NULL);
 }
 
+// Dial up / dial down for a "Dial events" channel, like the IKEA BILRESA wheel: each report is a multi-press
+// whose count is the number of notches (Home Assistant: event entity, multi_press_1 ... multi_press_10).
+static endpoint_t *create_dial_endpoint(node_t *node)
+{
+    generic_switch::config_t config;
+    config.switch_cluster.number_of_positions = 2;
+    config.switch_cluster.feature_flags = chip::to_underlying(Switch::Feature::kMomentarySwitch);
+    endpoint_t *endpoint = generic_switch::create(node, &config, ENDPOINT_FLAG_NONE, NULL);
+
+    cluster_t *sw_cluster = cluster::get(endpoint, Switch::Id);
+    if (sw_cluster) {
+        cluster::switch_cluster::feature::action_switch::add(sw_cluster);
+        cluster::switch_cluster::feature::momentary_switch_multi_press::config_t msm_config;
+        msm_config.multi_press_max = MATTER_DIAL_MAX_NOTCHES;
+        cluster::switch_cluster::feature::momentary_switch_multi_press::add(sw_cluster, &msm_config);
+    }
+    return endpoint;
+}
+
 static endpoint_t *create_deep_sleep_endpoint(node_t *node)
 {
     endpoint::mode_select::config_t cfg;
@@ -867,6 +890,14 @@ extern "C" void matter_init(void)
     }
     endpoint_t *ds_ep = create_deep_sleep_endpoint(node);
     if (ds_ep) deep_sleep_endpoint_id = endpoint::get_id(ds_ep);
+
+    // Last, so all earlier endpoint IDs stay the same: channel 1 up, channel 1 down, channel 2 up...
+    for (int i = 0; i < 3; i++) {
+        endpoint_t *up = create_dial_endpoint(node);
+        if (up) dial_up_endpoint_ids[i] = endpoint::get_id(up);
+        endpoint_t *down = create_dial_endpoint(node);
+        if (down) dial_down_endpoint_ids[i] = endpoint::get_id(down);
+    }
 
     esp_matter::set_custom_device_instance_info_provider(&gAppDeviceInstanceInfoProvider);
     // Must be set before the stack starts (before any GetDiagnosticDataProvider() call)
@@ -1011,6 +1042,19 @@ extern "C" void matter_send_channel_multi_press(uint8_t channel, uint8_t press_c
     cluster::switch_cluster::event::send_multi_press_complete(channel_switch_endpoint_ids[channel], 0, press_count);
 }
 
+extern "C" int matter_send_dial(uint8_t channel, int steps) {
+    if (channel >= 3 || steps == 0) return 0;
+    uint16_t ep = (steps > 0) ? dial_up_endpoint_ids[channel] : dial_down_endpoint_ids[channel];
+    int count = (steps > 0) ? steps : -steps;
+    if (count > MATTER_DIAL_MAX_NOTCHES) count = MATTER_DIAL_MAX_NOTCHES;
+    if (ep == 0) return 0;
+    {
+        chip::DeviceLayer::StackLock lock;
+        cluster::switch_cluster::event::send_multi_press_complete(ep, 0, (uint8_t)count);
+    }
+    return (steps > 0) ? count : -count;
+}
+
 // ============ MenuSystem Synchronization Functions ============
 // These are called FROM MenuSystem (user side) TO update Matter
 
@@ -1054,6 +1098,8 @@ extern "C" void matter_update_intensity(uint8_t channel, uint8_t intensity_0_100
 
     // Matter CurrentLevel is 1-254 (0x01-0xFE). 0 is technically Off or "Not at level"
     // We map 0-100% to 1-254 for the 'On' state.
+    if (channel_types[channel] == CHANNEL_TYPE_EVENTS) return;  // no light on this channel
+
     // On/Off channel: only on/off is reported and sent, so the light keeps its own brightness
     bool on_off_only = (channel_types[channel] == CHANNEL_TYPE_ON_OFF);
     if (on_off_only && intensity_0_100 > 0) intensity_0_100 = 100;

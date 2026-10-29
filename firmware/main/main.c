@@ -96,6 +96,10 @@ static volatile int idle_wake_pin = -1;
 static smart_button_t button;
 static menu_system_t menu;
 static bool is_plugged = false; // Detection via high battery voltage (charging)
+#define LOW_BATTERY_PERCENT 15
+static volatile int battery_percent = -1; // Last reading (-1 = not read yet)
+// "Dial events" channel woken by the button: the click is reported once the wake handling is done
+static volatile int wake_event_click_channel = -1;
 static uint32_t ha_update_pulse_time = 0; // Timer for visual feedback from HA
 static uint32_t ui_feedback_enable_time_ms = 0; // Suppress HA visual pulses during early boot
 
@@ -191,6 +195,16 @@ static void toggle_channel_from_button_wake(uint8_t channel)
     }
 
     uint32_t now = millis();
+    if (matter_get_channel_type(channel) == CHANNEL_TYPE_EVENTS) {
+        // No light to toggle: report the press as a click on this channel instead
+        menu.currentState = IN_CHANNEL_INTENSITY;
+        menu.showOverview = false;
+        menu.lastActivityTime = now;
+        wake_event_click_channel = channel;
+        menu_system_notify_interaction(channel);
+        menu_system_update_display(&menu);
+        return;
+    }
     uint8_t next_intensity = (menu.intensity[channel] == 0) ? 50 : 0;
 
     menu.currentState = IN_CHANNEL_INTENSITY;
@@ -457,7 +471,8 @@ static void update_battery_percent(void)
     }
 
     matter_set_battery_percent((uint8_t)percent);
-    
+    battery_percent = percent;
+
     // Simple "Plugged" detection: if battery voltage is >= 4200mV (charging range)
     is_plugged = (battery_mv >= 4200); 
 
@@ -597,6 +612,7 @@ static TaskHandle_t click_feedback_task_handle = NULL;
 #define FEEDBACK_MIDDLE 0x2 // LED 1
 #define FEEDBACK_SIDES  0x5 // LEDs 0 and 2
 #define FEEDBACK_ALL    0x7
+#define FEEDBACK_LOW_BATTERY 0xBA // notification value: 2 red blinks on all LEDs
 
 static void click_feedback_task(void *pvParameters)
 {
@@ -604,7 +620,8 @@ static void click_feedback_task(void *pvParameters)
     while (1) {
         uint32_t count = 0;
         xTaskNotifyWait(0, UINT32_MAX, &count, portMAX_DELAY);
-        if (!useLed || count < 2 || count > 5) {
+        bool low_battery = (count == FEEDBACK_LOW_BATTERY);
+        if (!useLed || (!low_battery && (count < 2 || count > 5))) {
             continue;
         }
 
@@ -614,6 +631,7 @@ static void click_feedback_task(void *pvParameters)
             case 3: groups[0] = FEEDBACK_ALL; break;
             case 4: groups[0] = FEEDBACK_ALL; groups[1] = FEEDBACK_MIDDLE; break;
             case 5: groups[0] = FEEDBACK_ALL; groups[1] = FEEDBACK_SIDES; break;
+            case FEEDBACK_LOW_BATTERY: groups[0] = FEEDBACK_ALL; groups[1] = FEEDBACK_ALL; break;
         }
 
         // Hold the LED mutex for the whole pattern so menu redraws don't interleave with it
@@ -623,7 +641,11 @@ static void click_feedback_task(void *pvParameters)
         for (int g = 0; g < 2 && groups[g]; g++) {
             for (int i = 0; i < LED_COUNT; i++) {
                 uint8_t v = (groups[g] & (1 << i)) ? 80 : 0;
-                led_strip_set_pixel(led_strip, i, v, v, v);
+                if (low_battery) {
+                    led_strip_set_pixel(led_strip, i, v, 0, 0);
+                } else {
+                    led_strip_set_pixel(led_strip, i, v, v, v);
+                }
             }
             led_strip_refresh(led_strip);
             delay_ms(180);
@@ -748,6 +770,9 @@ static void button_task(void *pvParameters)
         uint8_t multi_press_channel = menu.currentChannel;
         if (btnEvent >= 2 && menu.currentState != MENU_SELECT_CHANNEL) {
             multi_press_count = btnEvent;
+        } else if (btnEvent == 1 && menu.currentState != MENU_SELECT_CHANNEL &&
+                   matter_get_channel_type(menu.currentChannel) == CHANNEL_TYPE_EVENTS) {
+            multi_press_count = 1;  // Dial events channel: single clicks are reported too
         }
 
         if (btnEvent != 0) {
@@ -787,6 +812,9 @@ static void button_task(void *pvParameters)
                 sync_requested = true;
                 nvsWritePending = true;
                 lastNvsWriteTime = now;
+            }
+            if (menu.dialPending[ch] != 0) {
+                sync_requested = true;  // Dial events channel: notches waiting to be reported
             }
         }
 
@@ -842,6 +870,14 @@ static void button_task(void *pvParameters)
         if (should_sleep) {
             xSemaphoreGive(menu_mutex);
             enter_smart_sleep();
+            // Outside the menu mutex (the Matter task may be waiting on it)
+            if (wake_event_click_channel >= 0) {
+                matter_send_channel_multi_press((uint8_t)wake_event_click_channel, 1);
+                wake_event_click_channel = -1;
+            }
+            if (battery_percent >= 0 && battery_percent < LOW_BATTERY_PERCENT && click_feedback_task_handle) {
+                xTaskNotify(click_feedback_task_handle, FEEDBACK_LOW_BATTERY, eSetValueWithOverwrite);
+            }
             // Skip remaining loop work for this cycle after wake.
             vTaskDelay(pdMS_TO_TICKS(2));
             continue;
@@ -944,9 +980,10 @@ static void matter_sync_task(void *pvParameters)
         // Matter's reliable messaging (MRP) already retransmits, so each value is sent once.
         if (publish_ready && (now - last_send_time >= SYNC_MIN_GAP_MS) &&
             xSemaphoreTake(menu_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-            enum { SYNC_NONE = 0, SYNC_INTENSITY, SYNC_COLOR_TEMP, SYNC_RAINBOW_HUE } action = SYNC_NONE;
+            enum { SYNC_NONE = 0, SYNC_INTENSITY, SYNC_COLOR_TEMP, SYNC_RAINBOW_HUE, SYNC_DIAL } action = SYNC_NONE;
             uint8_t action_channel = 0;
             uint8_t value = 0;
+            int dial_steps = 0;
 
             for (int ch = 0; ch < 3 && action == SYNC_NONE; ch++) {
                 bool color_dirty = pending_color_temp_sync[ch] || pending_rainbow_hue_sync[ch] || pending_rainbow_mode_sync[ch];
@@ -966,13 +1003,20 @@ static void matter_sync_task(void *pvParameters)
                     pending_color_temp_sync[ch] = false;
                     pending_rainbow_hue_sync[ch] = false;
                     pending_rainbow_mode_sync[ch] = false;
+                } else if (menu.dialPending[ch] != 0) {
+                    // Notches turned since the last report, at most MATTER_DIAL_MAX_NOTCHES per event
+                    action = SYNC_DIAL;
+                    dial_steps = menu.dialPending[ch];
+                    if (dial_steps > MATTER_DIAL_MAX_NOTCHES) dial_steps = MATTER_DIAL_MAX_NOTCHES;
+                    if (dial_steps < -MATTER_DIAL_MAX_NOTCHES) dial_steps = -MATTER_DIAL_MAX_NOTCHES;
+                    menu.dialPending[ch] -= dial_steps;
                 }
                 action_channel = (uint8_t)ch;
             }
 
             for (int ch = 0; ch < 3; ch++) {
                 if (pending_intensity_sync[ch] || pending_color_temp_sync[ch] ||
-                    pending_rainbow_hue_sync[ch] || pending_rainbow_mode_sync[ch]) {
+                    pending_rainbow_hue_sync[ch] || pending_rainbow_mode_sync[ch] || menu.dialPending[ch] != 0) {
                     has_pending = true;
                 }
             }
@@ -988,6 +1032,9 @@ static void matter_sync_task(void *pvParameters)
             } else if (action == SYNC_RAINBOW_HUE) {
                 ESP_LOGI(TAG, "SYNC CH%d RAINBOW_HUE: %d", action_channel, value);
                 matter_update_rainbow_hue(action_channel, value);
+            } else if (action == SYNC_DIAL) {
+                ESP_LOGI(TAG, "SYNC CH%d DIAL: %+d", action_channel, dial_steps);
+                matter_send_dial(action_channel, dial_steps);
             }
             if (action != SYNC_NONE) {
                 last_send_time = now;
@@ -1170,6 +1217,9 @@ void app_main(void)
 
     // Perform immediate battery reading
     update_battery_percent();
+    if (battery_percent >= 0 && battery_percent < LOW_BATTERY_PERCENT && click_feedback_task_handle) {
+        xTaskNotify(click_feedback_task_handle, FEEDBACK_LOW_BATTERY, eSetValueWithOverwrite);
+    }
     
     if (matter_get_personality_int() == 2) {
         // In Thread personality, disable Wi-Fi to reduce radio contention.

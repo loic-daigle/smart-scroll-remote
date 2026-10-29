@@ -44,6 +44,7 @@ typedef struct {
     uint8_t colorTemp[3];
     uint8_t rainbowHue[3];
     bool isRainbowMode[3];
+    int16_t dialPending[3];   // "Dial events" channels: notches turned, not sent yet (+ up, - down)
 
     bool showOverview;
 

@@ -104,10 +104,11 @@ static void matter_cb_channel_type_changed(uint8_t channel) {
     if (type != CHANNEL_TYPE_COLOR) {
         g_actual_menu->isRainbowMode[channel] = false;
     }
+    g_actual_menu->dialPending[channel] = 0;
     if (g_actual_menu->currentChannel == channel) {
         menu_state_t s = g_actual_menu->currentState;
         bool allowed = (s == MENU_SELECT_CHANNEL || s == IN_CHANNEL_INTENSITY ||
-                        (s == IN_CHANNEL_COLOR_TEMP && type >= CHANNEL_TYPE_WHITE) ||
+                        (s == IN_CHANNEL_COLOR_TEMP && (type == CHANNEL_TYPE_WHITE || type == CHANNEL_TYPE_COLOR)) ||
                         (s == IN_CHANNEL_RAINBOW && type == CHANNEL_TYPE_COLOR));
         if (!allowed) g_actual_menu->currentState = IN_CHANNEL_INTENSITY;
     }

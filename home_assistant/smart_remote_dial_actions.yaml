@@ -1,0 +1,132 @@
+blueprint:
+  name: Smart Scroll Remote – Dial actions
+  description: >
+    Runs your own actions when a Smart Scroll Remote channel set to "Dial events (no light)" is turned or
+    clicked, like the IKEA BILRESA wheel. Use it for anything the remote should not mirror as a light:
+    media volume, blinds, a thermostat, scenes...
+
+    Inside the actions these variables are available:
+
+    - `notches`: how many notches were turned in this event (1-10, always positive).
+    - `steps`: the same, signed (+ up, - down). Handy for one action that handles both directions.
+
+    Examples: `light.turn_on` with `brightness_step_pct: "{{ steps * 5 }}"`, or `media_player.volume_set`
+    with `volume_level: "{{ [[state_attr('media_player.tv', 'volume_level') + steps * 0.02, 0] | max, 1] | min }}"`.
+
+    Set the channel's "Channel N type" to "Dial events (no light)" on the remote's device page first.
+    Create one automation per channel.
+  domain: automation
+  source_url: https://github.com/loic-daigle/smart-scroll-remote/blob/main/home_assistant/smart_remote_dial_actions.yaml
+  input:
+    dial_up_event:
+      name: Dial up entity
+      description: The remote's "dial up" event entity for this channel (the 6 last event entities, in order
+        channel 1 up, channel 1 down, channel 2 up...).
+      selector:
+        entity:
+          domain: event
+    dial_down_event:
+      name: Dial down entity
+      description: The remote's "dial down" event entity for this channel.
+      selector:
+        entity:
+          domain: event
+    dial_up_action:
+      name: Turned up
+      description: Runs once per event; `notches` says how far it was turned.
+      default: []
+      selector:
+        action: {}
+    dial_down_action:
+      name: Turned down
+      description: Runs once per event; `notches` says how far it was turned.
+      default: []
+      selector:
+        action: {}
+    clicks:
+      name: Click actions (optional)
+      icon: mdi:gesture-tap
+      collapsed: true
+      input:
+        click_event:
+          name: Channel click entity
+          description: The remote's click event entity for this channel (the 3 event entities after the lights).
+          default: []
+          selector:
+            entity:
+              domain: event
+        single_click_action:
+          name: Single click
+          default: []
+          selector:
+            action: {}
+        double_click_action:
+          name: Double click
+          default: []
+          selector:
+            action: {}
+        triple_click_action:
+          name: Triple click
+          default: []
+          selector:
+            action: {}
+        quad_click_action:
+          name: 4 clicks
+          default: []
+          selector:
+            action: {}
+        quint_click_action:
+          name: 5 clicks
+          default: []
+          selector:
+            action: {}
+
+# Queued: fast turns arrive as a few events per second and are applied in order, none dropped.
+mode: queued
+max: 10
+max_exceeded: silent
+
+triggers:
+  - trigger: state
+    entity_id: !input dial_up_event
+    id: up
+  - trigger: state
+    entity_id: !input dial_down_event
+    id: down
+  - trigger: state
+    entity_id: !input click_event
+    id: click
+
+conditions:
+  # A real new event only: not a restored state when the remote or Home Assistant reconnects.
+  - condition: template
+    value_template: >
+      {% set dead = ['unavailable', 'unknown'] %}
+      {{ trigger.from_state is not none and trigger.to_state is not none
+         and trigger.from_state.state not in dead and trigger.to_state.state not in dead }}
+
+variables:
+  event_type: "{{ trigger.to_state.attributes.get('event_type', '') }}"
+  # Each event is multi_press_N, N = number of notches (or clicks)
+  notches: >
+    {{ event_type | replace('multi_press_', '') | int(0) if event_type.startswith('multi_press_') else 0 }}
+  steps: "{{ notches if trigger.id == 'up' else (0 - notches) if trigger.id == 'down' else 0 }}"
+
+actions:
+  - condition: template
+    value_template: "{{ notches > 0 }}"
+  - choose:
+      - conditions: "{{ trigger.id == 'up' }}"
+        sequence: !input dial_up_action
+      - conditions: "{{ trigger.id == 'down' }}"
+        sequence: !input dial_down_action
+      - conditions: "{{ trigger.id == 'click' and notches == 1 }}"
+        sequence: !input single_click_action
+      - conditions: "{{ trigger.id == 'click' and notches == 2 }}"
+        sequence: !input double_click_action
+      - conditions: "{{ trigger.id == 'click' and notches == 3 }}"
+        sequence: !input triple_click_action
+      - conditions: "{{ trigger.id == 'click' and notches == 4 }}"
+        sequence: !input quad_click_action
+      - conditions: "{{ trigger.id == 'click' and notches == 5 }}"
+        sequence: !input quint_click_action
