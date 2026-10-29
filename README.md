@@ -1,5 +1,9 @@
 # Smart Scroll Remote
 
+<p align="center">
+  <img src="docs/media/smart-scroll-remote.jpg" alt="The Smart Scroll Remote: a white scroll wheel on a black oval case, with three small LED windows below the wheel" width="420">
+</p>
+
 A battery-powered **Matter** scroll-wheel remote for **ESP32-C6**, in the spirit of the IKEA BILRESA scroll remote. One rotary encoder, one button and three RGB LEDs control **three independent light channels**: brightness, colour temperature and colour.
 
 The same firmware runs on **Thread _or_ Wi-Fi**, selectable at runtime. On Thread it behaves as a proper **sleepy end device**: it sleeps between interactions but stays connected, so the first turn of the dial is answered within about a second.

@@ -3,6 +3,7 @@
 *.bin binary
 *.png binary
 *.jpg binary
+*.mp4 binary
 # Hardware files: stored byte-for-byte (STEP/STL/CSV exports must not have their line endings rewritten)
 *.step binary
 *.stp binary
